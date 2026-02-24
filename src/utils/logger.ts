@@ -26,7 +26,7 @@ export function initializeLogger(debug: boolean = false): void {
     format: winston.format.combine(
       winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
       winston.format.errors({ stack: true }),
-      winston.format.printf(({ level, message, timestamp, component, ...meta }) => {
+      winston.format.printf(({ level, message, timestamp, component, suppressEarly, ...meta }) => {
         // Color the level based on severity
         let coloredLevel: string;
         switch (level.toUpperCase()) {
@@ -52,7 +52,7 @@ export function initializeLogger(debug: boolean = false): void {
         // Add component prefix if provided (colored in cyan)
         const componentStr = component ? ` ${chalk.cyan(`[${component}]`)}` : '';
         
-        // Include remaining metadata if present
+        // Include remaining metadata if present (excluding suppressEarly which is internal)
         const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
         
         return `${timestampStr}${coloredLevel}${componentStr} ${message}${metaStr}`.trim();
