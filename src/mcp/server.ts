@@ -266,7 +266,8 @@ export async function startCodeModeBridgeServer(
   const mcpClients: MCPClient[] = []; // Keep track of clients for cleanup
   let totalToolCount = 0;
 
-  for (const config of serverConfigs) {
+  // Initialize all connections in parallel
+  const connectionPromises = serverConfigs.map(async (config) => {
     try {
       // Create client for this upstream MCP server using official SDK
       const client = new MCPClient(config);
@@ -293,6 +294,8 @@ export async function startCodeModeBridgeServer(
         const descriptor = convertMCPToolToDescriptor(tool, client, tool.name, config.name);
         allToolDescriptors[namespacedName] = descriptor;
       }
+
+      return { config: config.name, toolCount, success: true };
     } catch (error) {
       console.error(
         `[Bridge] Failed to connect to "${config.name}": ${
@@ -300,8 +303,15 @@ export async function startCodeModeBridgeServer(
         }`
       );
       // Continue with other servers instead of failing completely
+      return { config: config.name, toolCount: 0, success: false };
     }
-  }
+  });
+
+  // Wait for all connections to initialize in parallel
+  const results = await Promise.all(connectionPromises);
+
+  // Recalculate total tool count from results (in case totalToolCount wasn't updated due to timing)
+  totalToolCount = results.reduce((sum, result) => sum + (result?.toolCount || 0), 0);
 
   console.error(
     `[Bridge] Total: ${totalToolCount} tools from ${serverConfigs.length} server(s)`
