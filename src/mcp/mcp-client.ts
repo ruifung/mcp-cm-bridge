@@ -15,6 +15,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { tokenPersistence } from "./token-persistence.js";
 
 /**
  * OAuth2 configuration for HTTP/SSE transports
@@ -73,7 +74,27 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   private _clientInfo?: OAuthClientInformationMixed;
   private _discoveryState?: OAuthDiscoveryState;
 
-  constructor(private config: OAuth2Config) {}
+  constructor(private config: OAuth2Config, private serverUrl: string) {
+    console.log(`[OAuth] Creating provider for ${serverUrl}`);
+    
+    // Load tokens from persistence on initialization
+    const persistedTokens = tokenPersistence.getTokens(serverUrl);
+    if (persistedTokens) {
+      this._tokens = persistedTokens;
+      console.log(`[OAuth] Loaded persisted tokens for ${serverUrl}`);
+    } else {
+      console.log(`[OAuth] No persisted tokens found for ${serverUrl}`);
+    }
+    
+    // Load client information from persistence
+    const persistedClientInfo = tokenPersistence.getClientInformation(serverUrl);
+    if (persistedClientInfo) {
+      this._clientInfo = persistedClientInfo;
+      console.log(`[OAuth] Loaded persisted client info for ${serverUrl}`);
+    } else {
+      console.log(`[OAuth] No persisted client info found for ${serverUrl}`);
+    }
+  }
 
   get redirectUrl(): string | URL | undefined {
     return this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
@@ -115,24 +136,55 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   }
 
   saveClientInformation(clientInformation: OAuthClientInformationMixed): void {
-    // Save dynamically registered client information
+    // Save dynamically registered client information in memory
     this._clientInfo = clientInformation;
+    // Also persist to disk
+    tokenPersistence.saveClientInformation(this.serverUrl, clientInformation);
     console.log('OAuth client dynamically registered:', clientInformation.client_id);
   }
 
   tokens(): OAuthTokens | undefined {
-    return this._tokens;
+    // First try in-memory tokens
+    if (this._tokens) {
+      console.log('[OAuth] tokens() returning in-memory tokens');
+      return this._tokens;
+    }
+    
+    // Fallback to persistence if memory is empty
+    console.log('[OAuth] tokens() checking persistence...');
+    const persistedTokens = tokenPersistence.getTokens(this.serverUrl);
+    if (persistedTokens) {
+      this._tokens = persistedTokens;
+      console.log(`[OAuth] tokens() returning persisted tokens for ${this.serverUrl}`);
+      return persistedTokens;
+    }
+    
+    console.log('[OAuth] tokens() returning undefined - no tokens available');
+    return undefined;
   }
 
   saveTokens(tokens: OAuthTokens): void {
+    console.log(`[OAuth] saveTokens() called for ${this.serverUrl}`);
     this._tokens = tokens;
+    // Also persist tokens to disk
+    tokenPersistence.saveTokens(this.serverUrl, tokens);
+    console.log(`[OAuth] Tokens saved to persistence`);
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
+    const { open } = require('open');
+    
     console.log('\n=== OAuth Authorization Required ===');
-    console.log('Please visit this URL to authorize:');
-    console.log(authorizationUrl.toString());
-    console.log('====================================\n');
+    console.log(`Server: ${this.serverUrl}`);
+    console.log('Opening browser for authorization...');
+    console.log('URL:', authorizationUrl.toString());
+    
+    // Open in default browser
+    open(authorizationUrl.toString()).catch((err: Error) => {
+      console.log('Could not open browser automatically.');
+      console.log('Please visit this URL to authorize:');
+      console.log(authorizationUrl.toString());
+    });
   }
 
   saveCodeVerifier(codeVerifier: string): void {
@@ -190,8 +242,8 @@ export class MCPClient {
     );
 
     // Create OAuth provider if config is present
-    if (config.oauth) {
-      this.oauthProvider = new SimpleOAuthProvider(config.oauth);
+    if (config.oauth && config.url) {
+      this.oauthProvider = new SimpleOAuthProvider(config.oauth, config.url);
     }
   }
 
@@ -228,6 +280,18 @@ export class MCPClient {
       }
 
       // Create HTTP transport using Streamable HTTP with optional OAuth
+      if (this.oauthProvider) {
+        console.log(`[HTTP] Connecting with OAuth provider to ${this.config.url}`);
+        const currentTokens = this.oauthProvider.tokens();
+        if (currentTokens) {
+          console.log(`[HTTP] OAuth tokens available`);
+        } else {
+          console.log('[HTTP] WARNING: No OAuth tokens available');
+        }
+      } else {
+        console.log(`[HTTP] Connecting without OAuth to ${this.config.url}`);
+      }
+
       this.transport = new StreamableHTTPClientTransport(
         new URL(this.config.url),
         this.oauthProvider ? { authProvider: this.oauthProvider } : undefined

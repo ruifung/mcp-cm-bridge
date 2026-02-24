@@ -18,6 +18,7 @@ export interface MCPServerConfigEntry {
   args?: string[];
   url?: string;
   env?: Record<string, string>;
+  oauth?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -78,19 +79,23 @@ export function getServerConfig(config: MCPJsonConfig, serverName: string): MCPS
     type: entry.type,
   };
 
-   if (entry.type === "stdio") {
-     if (!entry.command) {
-       throw new Error(`Server "${serverName}" of type "stdio" requires "command" field`);
-     }
-     serverConfig.command = entry.command;
-     serverConfig.args = entry.args;
-     serverConfig.env = entry.env;
-   } else if (entry.type === "http") {
-     if (!entry.url) {
-       throw new Error(`Server "${serverName}" of type "http" requires "url" field`);
-     }
-     serverConfig.url = entry.url;
-   }
+  if (entry.type === "stdio") {
+    if (!entry.command) {
+      throw new Error(`Server "${serverName}" of type "stdio" requires "command" field`);
+    }
+    serverConfig.command = entry.command;
+    serverConfig.args = entry.args;
+    serverConfig.env = entry.env;
+  } else if (entry.type === "http") {
+    if (!entry.url) {
+      throw new Error(`Server "${serverName}" of type "http" requires "url" field`);
+    }
+    serverConfig.url = entry.url;
+    // Extract oauth configuration if present
+    if (entry.oauth) {
+      serverConfig.oauth = entry.oauth as any;
+    }
+  }
 
   return serverConfig;
 }
