@@ -22,7 +22,7 @@ import {
 import { startCodeModeBridgeServer, type MCPServerConfig } from "../mcp/server.js";
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
-import { initializeLogger } from "../utils/logger.js";
+import { initializeLogger, logInfo, logError } from "../utils/logger.js";
 
 /**
  * Run the bridge server
@@ -41,13 +41,13 @@ export async function runServer(
 
     // Load the bridge configuration
     const bridgeConfig = loadConfig(configPath);
-    console.error(
-      chalk.green("✓") +
-        ` Loaded config from: ${getConfigFilePath(configPath)}`
+    logInfo(
+      `Loaded config from: ${getConfigFilePath(configPath)}`,
+      { component: 'CLI' }
     );
-    console.error(
-      chalk.green("✓") +
-        ` Found ${Object.keys(bridgeConfig.servers).length} configured servers\n`
+    logInfo(
+      `Found ${Object.keys(bridgeConfig.servers).length} configured servers`,
+      { component: 'CLI' }
     );
 
     // Determine which servers to connect to
@@ -55,12 +55,12 @@ export async function runServer(
 
     if (servers && servers.length > 0) {
       serverNames = servers;
-      console.error(chalk.blue("📡") + ` Loading servers: ${serverNames.join(", ")}`);
+      logInfo(`Loading servers: ${serverNames.join(", ")}`, { component: 'CLI' });
     } else if (Object.keys(bridgeConfig.servers).length > 0) {
       serverNames = Object.keys(bridgeConfig.servers);
-      console.error(
-        chalk.yellow("ℹ") +
-          ` No servers specified, loading all configured servers: ${serverNames.join(", ")}`
+      logInfo(
+        `No servers specified, loading all configured servers: ${serverNames.join(", ")}`,
+        { component: 'CLI' }
       );
     } else {
       console.error(
@@ -74,30 +74,29 @@ export async function runServer(
       try {
         const serverConfig = getServerConfig(bridgeConfig, serverName);
         serverConfigs.push(serverConfig);
-        console.error(chalk.green("✓") + ` Loaded ${serverName}`);
+        logInfo(`Loaded ${serverName}`, { component: 'CLI' });
       } catch (err) {
-        console.error(
-          chalk.red("✗") +
-            ` Failed to load ${serverName}: ${(err as Error).message}`
+        logError(
+          `Failed to load ${serverName}`,
+          err instanceof Error ? err : { error: String(err) }
         );
         process.exit(1);
       }
     }
 
-    console.error(
-      chalk.green("✓") +
-        ` Starting bridge with ${serverConfigs.length} server(s)\n`
+    logInfo(
+      `Starting bridge with ${serverConfigs.length} server(s)`,
+      { component: 'CLI' }
     );
 
     // Start the MCP bridge server
     await startCodeModeBridgeServer(serverConfigs);
 
-    console.error(chalk.green("✓") + " Bridge is running!");
+    logInfo("Bridge is running!", { component: 'CLI' });
   } catch (error) {
-    console.error(
-      chalk.red("✗") +
-        " Error: " +
-        (error instanceof Error ? error.message : String(error))
+    logError(
+      "Error",
+      error instanceof Error ? error : { error: String(error) }
     );
     process.exit(1);
   }
