@@ -410,10 +410,7 @@ export async function authLoginCommand(serverName: string, configPath?: string):
     logInfo(`Connecting to ${serverName} for OAuth authentication`, { component: 'CLI' });
     await client.connect();
     
-    // Give a moment for OAuth flow to complete and tokens to be saved
-    // The OAuth provider will handle redirecting the browser and capturing the code
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
+    // OAuth flow is complete and tokens are saved
     console.log(chalk.green('\n✓ OAuth login completed. Tokens have been saved.\n'));
     process.exit(0);
 
