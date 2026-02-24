@@ -23,12 +23,18 @@ export function initializeLogger(debug: boolean = false): void {
     format: winston.format.combine(
       winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
       winston.format.errors({ stack: true }),
-      winston.format.printf(({ level, message, timestamp, ...meta }) => {
-        // Only include timestamp in debug mode
+      winston.format.printf(({ level, message, timestamp, component, ...meta }) => {
+        // Build the prefix with timestamp (debug only) and level
         const timestampStr = debug ? `[${timestamp}] ` : '';
         const levelStr = `[${level.toUpperCase()}]`;
-        const metaStr = Object.keys(meta).length > 0 ? JSON.stringify(meta) : '';
-        return `${timestampStr}${levelStr} ${message} ${metaStr}`.trim();
+        
+        // Add component prefix if provided
+        const componentStr = component ? ` [${component}]` : '';
+        
+        // Include remaining metadata if present
+        const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
+        
+        return `${timestampStr}${levelStr}${componentStr} ${message}${metaStr}`.trim();
       })
     ),
     transports: [
