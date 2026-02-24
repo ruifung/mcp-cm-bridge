@@ -393,6 +393,10 @@ export async function authLoginCommand(serverName: string, configPath?: string):
     }
 
     console.log(chalk.cyan(`\nInitiating OAuth login for ${chalk.bold(serverName)}...\n`));
+    console.log(chalk.dim("This will:"));
+    console.log(chalk.dim("  1. Connect to the server"));
+    console.log(chalk.dim("  2. Open your browser for authorization"));
+    console.log(chalk.dim("  3. Save your OAuth tokens for future use\n"));
 
     // Get server config for MCP client
     const serverConfig = getServerConfig(config, serverName);
@@ -400,21 +404,34 @@ export async function authLoginCommand(serverName: string, configPath?: string):
     // Create MCP client and initiate OAuth flow
     const client = new MCPClient(serverConfig);
     
-    console.log(chalk.cyan("Connecting to server..."));
+    console.log(chalk.cyan("Connecting to server and initiating OAuth flow..."));
     await client.connect();
 
     console.log(chalk.green(`✓ Successfully authenticated to ${serverName}`));
     console.log(chalk.cyan(`\nTokens have been saved for future use.\n`));
 
   } catch (error) {
-    logError(
-      `Failed to complete OAuth login for ${serverName}`,
-      error instanceof Error ? error : { error: String(error) }
-    );
-    console.error(chalk.red("\n✗ OAuth login failed"));
-    if (error instanceof Error) {
-      console.error(chalk.red(error.message));
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    
+    // Check if it's an authorization/OAuth related error
+    if (errorMsg.includes('Unauthorized') || errorMsg.includes('oauth') || errorMsg.includes('401')) {
+      console.error(chalk.red("\n✗ OAuth login failed - Authorization error"));
+      console.error(chalk.dim("\nPossible causes:"));
+      console.error(chalk.dim("  • Invalid OAuth credentials in server configuration"));
+      console.error(chalk.dim("  • Authorization was denied or timed out"));
+      console.error(chalk.dim("  • Server does not support OAuth\n"));
+    } else {
+      logError(
+        `Failed to complete OAuth login for ${serverName}`,
+        error instanceof Error ? error : { error: String(error) }
+      );
+      console.error(chalk.red("\n✗ OAuth login failed"));
+      console.error(chalk.red(errorMsg));
     }
+    
+    console.error(chalk.yellow("\nTo retry, run:"));
+    console.error(chalk.yellow(`  codemode-bridge auth login ${serverName}\n`));
+    
     process.exit(1);
   }
 }
