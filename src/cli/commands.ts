@@ -24,7 +24,7 @@ import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
 import { tokenPersistence } from "../mcp/token-persistence.js";
-import { MCPClient } from "../mcp/mcp-client.js";
+import { MCPClient, type OAuth2Config } from "../mcp/mcp-client.js";
 
 /**
  * Run the bridge server
@@ -364,6 +364,9 @@ export function configInfoCommand(configPath?: string): void {
  */
 export async function authLoginCommand(serverName: string, configPath?: string): Promise<void> {
   try {
+    // Initialize logger
+    initializeLogger(false);
+
     // Load config and validate server
     const config = loadConfig(configPath);
     const serverEntry = getServer(config, serverName);
@@ -390,19 +393,31 @@ export async function authLoginCommand(serverName: string, configPath?: string):
       process.exit(1);
     }
 
-    console.log(chalk.cyan(`\nStarting bridge for OAuth login to ${chalk.bold(serverName)}...\n`));
+    console.log(chalk.cyan(`\nAuthenticating with ${chalk.bold(serverName)}...\n`));
     
-    // Start the bridge with only this server
-    // This will trigger the OAuth flow during connection
-    await runServer(configPath, [serverName], false);
+    // Create an MCP client directly for this server
+    // This triggers the OAuth flow without starting the full bridge
+    const mcpConfig: MCPServerConfig = {
+      name: serverName,
+      type: serverEntry.type,
+      url: serverEntry.url,
+      oauth: serverEntry.oauth as OAuth2Config,
+    };
+
+    const client = new MCPClient(mcpConfig);
+    
+    // Connect - this will trigger OAuth flow if tokens are not available
+    logInfo(`Connecting to ${serverName} for OAuth authentication`, { component: 'CLI' });
+    await client.connect();
+    
+    // Give a moment for OAuth flow to complete and tokens to be saved
+    // The OAuth provider will handle redirecting the browser and capturing the code
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    console.log(chalk.green('\n✓ OAuth login completed. Tokens have been saved.\n'));
+    process.exit(0);
 
   } catch (error) {
-    if (error instanceof Error && error.message.includes('SIGINT')) {
-      // User pressed Ctrl+C, which is normal
-      console.log(chalk.green('\n✓ OAuth login completed. Tokens have been saved.\n'));
-      process.exit(0);
-    }
-    
     logError(
       `Failed to complete OAuth login for ${serverName}`,
       error instanceof Error ? error : { error: String(error) }
