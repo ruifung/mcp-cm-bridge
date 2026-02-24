@@ -1,0 +1,47 @@
+{
+  "name": "codemode-bridge",
+  "version": "1.0.0",
+  "description": "MCP bridge that connects to upstream MCP servers and exposes tools via a single codemode tool for orchestration",
+  "main": "dist/index.js",
+  "bin": {
+    "codemode-bridge": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "config"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "dev:cli": "tsx src/cli/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "codemode",
+    "cloudflare",
+    "bridge",
+    "orchestration"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/mcp": "^1.0.21",
+    "@ai-sdk/openai": "^3.0.31",
+    "@cloudflare/codemode": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "@types/node": "^25.3.0",
+    "ai": "^6.0.97",
+    "chalk": "^5.6.2",
+    "commander": "^12.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "uuid": "^13.0.0",
+    "vm2": "^3.10.5",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

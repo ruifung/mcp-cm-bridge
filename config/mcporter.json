@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codemode-bridge": {
+      "command": "npm",
+      "args": ["run", "dev:cli", "--", "run", "--servers", "kubernetes"],
+      "cwd": "D:\\Projects\\codemore-mcp-proxy\\codemode-bridge"
+    }
+  },
+  "imports": []
+}
