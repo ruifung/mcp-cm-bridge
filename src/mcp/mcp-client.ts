@@ -17,7 +17,6 @@ import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprot
 import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { tokenPersistence } from "./token-persistence.js";
 import { logDebug } from "../utils/logger.js";
-import { PassThrough } from "stream";
 
 /**
  * OAuth2 configuration for HTTP/SSE transports
@@ -268,22 +267,13 @@ export class MCPClient {
       );
       const env = this.config.env ? { ...baseEnv, ...this.config.env } : baseEnv;
 
-      // Create a pass-through stream to capture stderr from the child process
-      const stderrCapture = new PassThrough();
-      
-      stderrCapture.on('data', (chunk: Buffer) => {
-        // Log stderr in real-time
-        const text = chunk.toString('utf-8').trim();
-        if (text) {
-          logDebug(`[${this.config.name}] ${text}`, { component: 'Stdio Tool' });
-        }
-      });
-
+      // Set stderr to 'inherit' so it goes to parent's stderr (will be captured by our logger)
+      // This allows stdio tools to output debug info that will be visible
       this.transport = new StdioClientTransport({
         command: this.config.command,
         args: this.config.args || [],
         env,
-        stderr: stderrCapture,
+        stderr: 'inherit',
       });
 
       await this.client.connect(this.transport);
