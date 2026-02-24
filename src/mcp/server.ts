@@ -263,6 +263,7 @@ export async function startCodeModeBridgeServer(
 
   // Collect all tools from upstream MCP servers using official MCP SDK
   const allToolDescriptors: Record<string, any> = {};
+  const toolsByServer: Record<string, string[]> = {}; // Track tools grouped by server
   const mcpClients: MCPClient[] = []; // Keep track of clients for cleanup
   let totalToolCount = 0;
 
@@ -286,11 +287,15 @@ export async function startCodeModeBridgeServer(
         { component: 'Bridge' }
       );
 
+      // Track tools for this server
+      toolsByServer[config.name] = [];
+
       // Namespace tools by server name to avoid conflicts
       // e.g., kubernetes.get_pod -> kubernetes__get_pod
       // Convert native MCP tools (JSON Schema) to ToolDescriptor format (Zod)
       for (const tool of serverTools) {
         const namespacedName = `${config.name}__${tool.name}`;
+        toolsByServer[config.name].push(namespacedName);
         // Convert the native MCP tool to ToolDescriptor format
         const descriptor = convertMCPToolToDescriptor(tool, client, tool.name, config.name);
         allToolDescriptors[namespacedName] = descriptor;
@@ -318,13 +323,23 @@ export async function startCodeModeBridgeServer(
     { component: 'Bridge' }
   );
 
+  // Log tools grouped by server
+  for (const [serverName, tools] of Object.entries(toolsByServer)) {
+    if (tools.length > 0) {
+      logInfo(
+        `${serverName}: ${tools.join(', ')}`,
+        { component: 'Bridge', server: serverName }
+      );
+    }
+  }
+
   // Create the executor using the codemode SDK pattern
   const executor = createExecutor(30000); // 30 second timeout
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
   logInfo(
-    `Creating codemode tool with tools: ${Object.keys(allToolDescriptors).join(', ')}`,
+    `Creating codemode tool with ${totalToolCount} tools from ${serverConfigs.length} server(s)`,
     { component: 'Bridge' }
   );
   const codemodeTool = createCodeTool({
