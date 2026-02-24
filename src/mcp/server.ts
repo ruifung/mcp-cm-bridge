@@ -318,9 +318,6 @@ export async function startCodeModeBridgeServer(
   // Wait for all connections to initialize in parallel
   const results = await Promise.all(connectionPromises);
 
-  // Flush buffered stderr output from stdio tools now that startup is complete
-  flushStderrBuffer();
-
   // Recalculate total tool count from results (in case totalToolCount wasn't updated due to timing)
   totalToolCount = results.reduce((sum, result) => sum + (result?.toolCount || 0), 0);
 
@@ -338,6 +335,9 @@ export async function startCodeModeBridgeServer(
       );
     }
   }
+
+  // Flush buffered stderr output from stdio tools now that startup summary is complete
+  flushStderrBuffer();
 
   // Create the executor using the codemode SDK pattern
   const executor = createExecutor(30000); // 30 second timeout
