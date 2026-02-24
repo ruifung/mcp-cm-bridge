@@ -173,16 +173,21 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
-    const { open } = require('open');
-    
     logDebug('=== OAuth Authorization Required ===', { component: 'OAuth' });
     logDebug(`Server: ${this.serverUrl}`, { component: 'OAuth' });
     logDebug('Opening browser for authorization...', { component: 'OAuth' });
     logDebug(`URL: ${authorizationUrl.toString()}`, { component: 'OAuth' });
     
-    // Open in default browser
-    open(authorizationUrl.toString()).catch((err: Error) => {
-      logDebug('Could not open browser automatically.', { component: 'OAuth' });
+    // Open in default browser using dynamic import
+    import('open').then((module) => {
+      const open = module.default;
+      open(authorizationUrl.toString()).catch((err: Error) => {
+        logDebug('Could not open browser automatically.', { component: 'OAuth' });
+        logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
+        logDebug(authorizationUrl.toString(), { component: 'OAuth' });
+      });
+    }).catch((err: Error) => {
+      logDebug('Could not import open module.', { component: 'OAuth' });
       logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
       logDebug(authorizationUrl.toString(), { component: 'OAuth' });
     });
