@@ -22,7 +22,7 @@ import {
 import { startCodeModeBridgeServer, type MCPServerConfig } from "../mcp/server.js";
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
-import { initializeLogger, logInfo, logError } from "../utils/logger.js";
+import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
 
 /**
  * Run the bridge server
@@ -91,6 +91,9 @@ export async function runServer(
 
     // Start the MCP bridge server
     await startCodeModeBridgeServer(serverConfigs);
+
+    // Flush buffered stderr output from stdio tools now that Bridge is fully running
+    flushStderrBuffer();
 
     logInfo("Bridge is running!", { component: 'CLI' });
   } catch (error) {

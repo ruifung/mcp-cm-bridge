@@ -22,7 +22,7 @@ import { z } from "zod";
 import { createExecutor } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
-import { logDebug, logError, logInfo, enableStderrBuffering, flushStderrBuffer } from "../utils/logger.js";
+import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
 
 // Re-export MCPServerConfig for backwards compatibility
 export type { MCPServerConfig }
@@ -335,9 +335,6 @@ export async function startCodeModeBridgeServer(
       );
     }
   }
-
-  // Flush buffered stderr output from stdio tools now that startup summary is complete
-  flushStderrBuffer();
 
   // Create the executor using the codemode SDK pattern
   const executor = createExecutor(30000); // 30 second timeout
