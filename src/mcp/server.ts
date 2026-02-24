@@ -22,7 +22,7 @@ import { z } from "zod";
 import { createExecutor } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
-import { logDebug } from "../utils/logger.js";
+import { logDebug, logError, logInfo } from "../utils/logger.js";
 
 // Re-export MCPServerConfig for backwards compatibility
 export type { MCPServerConfig }
@@ -281,8 +281,9 @@ export async function startCodeModeBridgeServer(
       const toolCount = serverTools.length;
       totalToolCount += toolCount;
 
-      console.error(
-        `[Bridge] Server "${config.name}" has ${toolCount} tools`
+      logDebug(
+        `Server "${config.name}" has ${toolCount} tools`,
+        { component: 'Bridge' }
       );
 
       // Namespace tools by server name to avoid conflicts
@@ -297,10 +298,9 @@ export async function startCodeModeBridgeServer(
 
       return { config: config.name, toolCount, success: true };
     } catch (error) {
-      console.error(
-        `[Bridge] Failed to connect to "${config.name}": ${
-          error instanceof Error ? error.message : String(error)
-        }`
+      logError(
+        `Failed to connect to "${config.name}"`,
+        error instanceof Error ? error : { error: String(error) }
       );
       // Continue with other servers instead of failing completely
       return { config: config.name, toolCount: 0, success: false };
@@ -313,8 +313,9 @@ export async function startCodeModeBridgeServer(
   // Recalculate total tool count from results (in case totalToolCount wasn't updated due to timing)
   totalToolCount = results.reduce((sum, result) => sum + (result?.toolCount || 0), 0);
 
-  console.error(
-    `[Bridge] Total: ${totalToolCount} tools from ${serverConfigs.length} server(s)`
+  logInfo(
+    `Total: ${totalToolCount} tools from ${serverConfigs.length} server(s)`,
+    { component: 'Bridge' }
   );
 
   // Create the executor using the codemode SDK pattern
@@ -322,7 +323,10 @@ export async function startCodeModeBridgeServer(
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
-  console.error("[Bridge] Creating codemode tool with tools:", Object.keys(allToolDescriptors));
+  logInfo(
+    `Creating codemode tool with tools: ${Object.keys(allToolDescriptors).join(', ')}`,
+    { component: 'Bridge' }
+  );
   const codemodeTool = createCodeTool({
     tools: allToolDescriptors,
     executor,
@@ -337,9 +341,10 @@ export async function startCodeModeBridgeServer(
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
 
-  console.error(`[Code Mode Bridge] Ready on stdio transport`);
-  console.error(
-    `[Code Mode Bridge] Connected to: ${serverConfigs.map((s) => s.name).join(", ")}`
+  logInfo(`Ready on stdio transport`, { component: 'Code Mode Bridge' });
+  logInfo(
+    `Connected to: ${serverConfigs.map((s) => s.name).join(", ")}`,
+    { component: 'Code Mode Bridge' }
   );
-  console.error(`[Code Mode Bridge] Exposing single 'codemode' tool`);
+  logInfo(`Exposing single 'codemode' tool`, { component: 'Code Mode Bridge' });
 }
