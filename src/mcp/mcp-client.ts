@@ -27,7 +27,10 @@ export interface OAuth2Config {
   clientId?: string;
   /** OAuth client secret (optional for public clients) */
   clientSecret?: string;
-  /** OAuth redirect URL for authorization flow */
+  /** 
+   * OAuth redirect URL for authorization flow.
+   * Defaults to "http://localhost:3000/oauth/callback" if not provided.
+   */
   redirectUrl?: string;
   /** OAuth scopes to request */
   scope?: string;
@@ -63,6 +66,8 @@ export interface MCPTool {
  * Supports both pre-registered clients and dynamic client registration (RFC 7591)
  */
 class SimpleOAuthProvider implements OAuthClientProvider {
+  private static readonly DEFAULT_REDIRECT_URL = 'http://localhost:3000/oauth/callback';
+  
   private _tokens?: OAuthTokens;
   private _codeVerifier?: string;
   private _clientInfo?: OAuthClientInformationMixed;
@@ -71,12 +76,13 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   constructor(private config: OAuth2Config) {}
 
   get redirectUrl(): string | URL | undefined {
-    return this.config.redirectUrl;
+    return this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
   }
 
   get clientMetadata(): OAuthClientMetadata {
+    const redirectUrl = this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
     const metadata: OAuthClientMetadata = {
-      redirect_uris: this.config.redirectUrl ? [this.config.redirectUrl] : [],
+      redirect_uris: [redirectUrl],
       client_name: 'CodeMode Bridge',
     };
 
