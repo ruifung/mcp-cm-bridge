@@ -16,6 +16,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { tokenPersistence } from "./token-persistence.js";
+import { OAuthCallbackServer } from "./oauth-handler.js";
 import { logDebug, logInfo } from "../utils/logger.js";
 
 /**
@@ -74,6 +75,8 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   private _codeVerifier?: string;
   private _clientInfo?: OAuthClientInformationMixed;
   private _discoveryState?: OAuthDiscoveryState;
+  private _callbackServer?: OAuthCallbackServer;
+  private _finishAuthCallback?: (code: string) => Promise<void>;
 
   constructor(private config: OAuth2Config, private serverUrl: string) {
     logDebug(`Creating provider for ${serverUrl}`, { component: 'OAuth' });
@@ -97,14 +100,27 @@ class SimpleOAuthProvider implements OAuthClientProvider {
     }
   }
 
+  /**
+   * Set the callback to be invoked when authorization code is received.
+   * This should be called by MCPClient with the transport's finishAuth method.
+   */
+  setFinishAuthCallback(callback: (code: string) => Promise<void>) {
+    this._finishAuthCallback = callback;
+  }
+
   get redirectUrl(): string | URL | undefined {
+    // If using dynamic port assignment, return the server's actual URL
+    if (this._callbackServer) {
+      return this._callbackServer.getRedirectUrl();
+    }
+    // Otherwise use config or default
     return this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
   }
 
   get clientMetadata(): OAuthClientMetadata {
-    const redirectUrl = this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
+    const redirectUrl = this.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
     const metadata: OAuthClientMetadata = {
-      redirect_uris: [redirectUrl],
+      redirect_uris: [String(redirectUrl)],
       client_name: 'CodeMode Bridge',
     };
 
@@ -172,25 +188,57 @@ class SimpleOAuthProvider implements OAuthClientProvider {
     logDebug('Tokens saved to persistence', { component: 'OAuth' });
   }
 
-  redirectToAuthorization(authorizationUrl: URL): void {
+  async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
     logDebug('=== OAuth Authorization Required ===', { component: 'OAuth' });
     logDebug(`Server: ${this.serverUrl}`, { component: 'OAuth' });
     logDebug('Opening browser for authorization...', { component: 'OAuth' });
     logDebug(`URL: ${authorizationUrl.toString()}`, { component: 'OAuth' });
     
-    // Open in default browser using dynamic import
-    import('open').then((module) => {
-      const open = module.default;
-      open(authorizationUrl.toString()).catch((err: Error) => {
-        logDebug('Could not open browser automatically.', { component: 'OAuth' });
+    // Start the callback server to listen for the authorization code
+    const redirectUrl = this.config.redirectUrl || SimpleOAuthProvider.DEFAULT_REDIRECT_URL;
+    this._callbackServer = new OAuthCallbackServer(redirectUrl);
+    
+    try {
+      // Start listening for callback in the background
+      // Don't await this - it will resolve when code is received
+      const authCodePromise = this._callbackServer.waitForAuthorizationCode(300000); // 5 min timeout
+      
+      // Open in default browser using dynamic import
+      import('open').then((module) => {
+        const open = module.default;
+        open(authorizationUrl.toString()).catch((err: Error) => {
+          logDebug('Could not open browser automatically.', { component: 'OAuth' });
+          logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
+          logDebug(authorizationUrl.toString(), { component: 'OAuth' });
+        });
+      }).catch((err: Error) => {
+        logDebug('Could not import open module.', { component: 'OAuth' });
         logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
         logDebug(authorizationUrl.toString(), { component: 'OAuth' });
       });
-    }).catch((err: Error) => {
-      logDebug('Could not import open module.', { component: 'OAuth' });
-      logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
-      logDebug(authorizationUrl.toString(), { component: 'OAuth' });
-    });
+      
+      // Wait for the authorization code
+      const authorizationCode = await authCodePromise;
+      logDebug(`Authorization code received: ${authorizationCode.substring(0, 10)}...`, { component: 'OAuth' });
+      
+      // Call the finish auth callback if set
+      if (this._finishAuthCallback) {
+        logDebug('Calling finishAuth with authorization code', { component: 'OAuth' });
+        await this._finishAuthCallback(authorizationCode);
+      } else {
+        logDebug('WARNING: finishAuthCallback not set - authorization code cannot be exchanged', { component: 'OAuth' });
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logDebug(`OAuth authorization failed: ${errorMsg}`, { component: 'OAuth' });
+      throw error;
+    } finally {
+      // Clean up callback server
+      if (this._callbackServer) {
+        await this._callbackServer.stop();
+        this._callbackServer = undefined;
+      }
+    }
   }
 
   saveCodeVerifier(codeVerifier: string): void {
@@ -316,11 +364,24 @@ export class MCPClient {
         logDebug(`Connecting without OAuth to ${this.config.url}`, { component: 'HTTP' });
       }
 
-      this.transport = new StreamableHTTPClientTransport(
+      // Create HTTP transport
+      const httpTransport = new StreamableHTTPClientTransport(
         new URL(this.config.url),
         this.oauthProvider ? { authProvider: this.oauthProvider } : undefined
       );
 
+      // Set up the callback for OAuth code exchange
+      if (this.oauthProvider) {
+        (this.oauthProvider as SimpleOAuthProvider).setFinishAuthCallback(
+          async (authorizationCode: string) => {
+            logDebug('Exchanging authorization code for tokens...', { component: 'OAuth' });
+            await httpTransport.finishAuth(authorizationCode);
+            logDebug('Authorization code exchanged successfully', { component: 'OAuth' });
+          }
+        );
+      }
+
+      this.transport = httpTransport;
       await this.client.connect(this.transport);
       this.connected = true;
     } else if (this.config.type === "sse") {
