@@ -20,8 +20,11 @@ import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } fr
  * OAuth2 configuration for HTTP/SSE transports
  */
 export interface OAuth2Config {
-  /** OAuth client ID */
-  clientId: string;
+  /** 
+   * OAuth client ID (optional for dynamic registration).
+   * If not provided, the client will attempt dynamic registration with the server.
+   */
+  clientId?: string;
   /** OAuth client secret (optional for public clients) */
   clientSecret?: string;
   /** OAuth redirect URL for authorization flow */
@@ -57,6 +60,7 @@ export interface MCPTool {
 
 /**
  * Simple in-memory OAuth provider implementation for basic OAuth flows
+ * Supports both pre-registered clients and dynamic client registration (RFC 7591)
  */
 class SimpleOAuthProvider implements OAuthClientProvider {
   private _tokens?: OAuthTokens;
@@ -84,19 +88,30 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   }
 
   clientInformation(): OAuthClientInformationMixed | undefined {
-    if (!this._clientInfo) {
-      this._clientInfo = {
+    // If client info was dynamically registered and saved, return it
+    if (this._clientInfo) {
+      return this._clientInfo;
+    }
+
+    // If clientId was provided in config (pre-registered), return static info
+    if (this.config.clientId) {
+      const info: OAuthClientInformationMixed = {
         client_id: this.config.clientId,
       };
       if (this.config.clientSecret) {
-        this._clientInfo.client_secret = this.config.clientSecret;
+        info.client_secret = this.config.clientSecret;
       }
+      return info;
     }
-    return this._clientInfo;
+
+    // Return undefined to trigger dynamic registration
+    return undefined;
   }
 
   saveClientInformation(clientInformation: OAuthClientInformationMixed): void {
+    // Save dynamically registered client information
     this._clientInfo = clientInformation;
+    console.log('OAuth client dynamically registered:', clientInformation.client_id);
   }
 
   tokens(): OAuthTokens | undefined {
