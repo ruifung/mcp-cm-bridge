@@ -362,10 +362,10 @@ export async function startCodeModeBridgeServer(
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
 
-  logInfo(`Ready on stdio transport`, { component: 'Code Mode Bridge' });
-  logInfo(
-    `Connected to: ${serverConfigs.map((s) => s.name).join(", ")}`,
-    { component: 'Code Mode Bridge' }
-  );
-  logInfo(`Exposing single 'codemode' tool`, { component: 'Code Mode Bridge' });
+  logInfo(`Ready on stdio transport`, { component: 'Bridge' });
+
+  logDebug(`Registering tool request handler`, {
+    component: 'Bridge'
+  });
+  logInfo(`Exposing single 'codemode' tool`, { component: 'Bridge' });
 }

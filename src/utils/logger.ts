@@ -96,10 +96,13 @@ export function enableStderrBuffering(): void {
  */
 export function flushStderrBuffer(): void {
   stderrBufferingEnabled = false;
-  for (const { message, meta } of stderrBuffer) {
-    logInfo(message, meta);
-  }
+  const buffered = stderrBuffer;
   stderrBuffer = [];
+  
+  // Log all buffered messages directly without going through logInfo to avoid recursion
+  for (const { message, meta } of buffered) {
+    getLogger().info(message, meta);
+  }
 }
 
 /**
