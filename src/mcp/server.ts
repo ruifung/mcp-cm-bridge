@@ -80,27 +80,137 @@ function jsonSchemaToZod(schema: any): z.ZodType<any> {
   // Handle array type
   if (schema.type === "array") {
     const itemSchema = schema.items ? jsonSchemaToZod(schema.items) : z.any();
-    return z.array(itemSchema);
+    let arraySchema = z.array(itemSchema);
+    
+    // Apply array constraints
+    if (typeof schema.minItems === "number") {
+      arraySchema = arraySchema.min(schema.minItems);
+    }
+    if (typeof schema.maxItems === "number") {
+      arraySchema = arraySchema.max(schema.maxItems);
+    }
+    
+    return arraySchema;
   }
 
   // Handle string type
   if (schema.type === "string") {
-    return z.string();
+    let stringSchema = z.string();
+    
+    // Handle enum
+    if (schema.enum && Array.isArray(schema.enum)) {
+      return z.enum(schema.enum as [string, ...string[]]);
+    }
+    
+    // Apply string format constraints
+    if (schema.format) {
+      switch (schema.format) {
+        case "email":
+          stringSchema = stringSchema.email();
+          break;
+        case "uuid":
+          stringSchema = stringSchema.uuid();
+          break;
+        case "url":
+          stringSchema = stringSchema.url();
+          break;
+        case "date-time":
+          stringSchema = stringSchema.datetime();
+          break;
+      }
+    }
+    
+    // Apply string length constraints
+    if (typeof schema.minLength === "number") {
+      stringSchema = stringSchema.min(schema.minLength);
+    }
+    if (typeof schema.maxLength === "number") {
+      stringSchema = stringSchema.max(schema.maxLength);
+    }
+    if (schema.pattern) {
+      stringSchema = stringSchema.regex(new RegExp(schema.pattern));
+    }
+    
+    return stringSchema;
   }
 
   // Handle number type
   if (schema.type === "number") {
-    return z.number();
+    let numberSchema = z.number();
+    
+    // Apply number constraints
+    if (typeof schema.minimum === "number") {
+      numberSchema = numberSchema.min(schema.minimum);
+    }
+    if (typeof schema.maximum === "number") {
+      numberSchema = numberSchema.max(schema.maximum);
+    }
+    if (typeof schema.multipleOf === "number") {
+      numberSchema = numberSchema.multipleOf(schema.multipleOf);
+    }
+    
+    return numberSchema;
   }
 
   // Handle integer type
   if (schema.type === "integer") {
-    return z.number().int();
+    let intSchema = z.number().int();
+    
+    // Apply number constraints
+    if (typeof schema.minimum === "number") {
+      intSchema = intSchema.min(schema.minimum);
+    }
+    if (typeof schema.maximum === "number") {
+      intSchema = intSchema.max(schema.maximum);
+    }
+    if (typeof schema.multipleOf === "number") {
+      intSchema = intSchema.multipleOf(schema.multipleOf);
+    }
+    
+    return intSchema;
   }
 
   // Handle boolean type
   if (schema.type === "boolean") {
     return z.boolean();
+  }
+
+  // Handle null type
+  if (schema.type === "null") {
+    return z.null();
+  }
+
+  // Handle anyOf (union types)
+  if (schema.anyOf && Array.isArray(schema.anyOf)) {
+    const schemas = schema.anyOf.map((s: any) => jsonSchemaToZod(s));
+    return z.union(schemas as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
+  }
+
+  // Handle oneOf (discriminated union)
+  if (schema.oneOf && Array.isArray(schema.oneOf)) {
+    const schemas = schema.oneOf.map((s: any) => jsonSchemaToZod(s));
+    return z.union(schemas as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
+  }
+
+  // Handle allOf (intersection types)
+  if (schema.allOf && Array.isArray(schema.allOf)) {
+    // Zod doesn't have native intersection for objects, so merge them
+    let merged: z.ZodType<any> = z.object({});
+    for (const subSchema of schema.allOf) {
+      const zodSchema = jsonSchemaToZod(subSchema);
+      merged = (merged as any).and(zodSchema);
+    }
+    return merged;
+  }
+
+  // Handle enum for non-string types
+  if (schema.enum && Array.isArray(schema.enum)) {
+    if (schema.enum.length === 1) {
+      return z.literal(schema.enum[0]);
+    }
+    // Create union of literals
+    const literals = schema.enum.map((val: any) => z.literal(val));
+    return z.union(literals as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
   }
 
   // Default to any

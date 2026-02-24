@@ -73,12 +73,13 @@ export class VM2Executor implements Executor {
       // Execute the code and capture result
       const result = vm.run(wrappedCode);
 
-      // If result is a promise, await it
+      // If result is a promise, await it with timeout
       if (result && typeof result === "object" && "then" in result) {
+        let timeoutHandle: NodeJS.Timeout;
         const awaitedResult = await Promise.race([
-          result,
-          new Promise((_, reject) =>
-            setTimeout(
+          result.finally(() => clearTimeout(timeoutHandle)),
+          new Promise((_, reject) => {
+            timeoutHandle = setTimeout(
               () =>
                 reject(
                   new Error(
@@ -86,8 +87,8 @@ export class VM2Executor implements Executor {
                   )
                 ),
               this.timeout
-            )
-          ),
+            );
+          }),
         ]);
         return {
           result: awaitedResult,
@@ -126,7 +127,8 @@ export class VM2Executor implements Executor {
     }
 
     // If it's an arrow function (async or not), wrap in IIFE
-    if (trimmed.includes("=>")) {
+    // Match actual arrow function syntax: (params) => or param => or async (params) => or async param =>
+    if (/^\s*(async\s+)?(\([^)]*\)|[\w$]+)\s*=>/.test(trimmed)) {
       return `(${trimmed})()`;
     }
 
