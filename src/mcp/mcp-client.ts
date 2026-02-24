@@ -280,7 +280,7 @@ export class MCPClient {
         stdioTransport.stderr.on('data', (data: Buffer) => {
           const lines = data.toString().split('\n').filter(line => line.trim());
           for (const line of lines) {
-            logInfo(line, { component: this.config.name });
+            logInfo(line, { component: this.config.name, suppressEarly: true });
           }
         });
         stdioTransport.stderr.on('error', (error: Error) => {

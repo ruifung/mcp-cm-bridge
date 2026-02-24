@@ -109,8 +109,8 @@ export function flushStderrBuffer(): void {
  * Log an info message
  */
 export function logInfo(message: string, meta?: Record<string, any>): void {
-  // Buffer stderr output from stdio tools during startup if buffering is enabled
-  if (stderrBufferingEnabled && meta?.component && meta.component !== 'Bridge') {
+  // Buffer logs marked with suppressEarly during startup if buffering is enabled
+  if (stderrBufferingEnabled && meta?.suppressEarly) {
     stderrBuffer.push({ message, meta });
   } else {
     getLogger().info(message, meta);
