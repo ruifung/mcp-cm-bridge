@@ -6,6 +6,7 @@
  */
 
 import winston from 'winston';
+import chalk from 'chalk';
 
 let logger: winston.Logger;
 let debugMode = false;
@@ -24,17 +25,35 @@ export function initializeLogger(debug: boolean = false): void {
       winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
       winston.format.errors({ stack: true }),
       winston.format.printf(({ level, message, timestamp, component, ...meta }) => {
-        // Build the prefix with timestamp (debug only) and level
-        const timestampStr = debug ? `[${timestamp}] ` : '';
-        const levelStr = `[${level.toUpperCase()}]`;
+        // Color the level based on severity
+        let coloredLevel: string;
+        switch (level.toUpperCase()) {
+          case 'ERROR':
+            coloredLevel = chalk.red(`[${level.toUpperCase()}]`);
+            break;
+          case 'WARN':
+            coloredLevel = chalk.yellow(`[${level.toUpperCase()}]`);
+            break;
+          case 'INFO':
+            coloredLevel = chalk.green(`[${level.toUpperCase()}]`);
+            break;
+          case 'DEBUG':
+            coloredLevel = chalk.blue(`[${level.toUpperCase()}]`);
+            break;
+          default:
+            coloredLevel = `[${level.toUpperCase()}]`;
+        }
         
-        // Add component prefix if provided
-        const componentStr = component ? ` [${component}]` : '';
+        // Build the prefix with timestamp (debug only)
+        const timestampStr = debug ? `[${timestamp}] ` : '';
+        
+        // Add component prefix if provided (colored in cyan)
+        const componentStr = component ? ` ${chalk.cyan(`[${component}]`)}` : '';
         
         // Include remaining metadata if present
         const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
         
-        return `${timestampStr}${levelStr}${componentStr} ${message}${metaStr}`.trim();
+        return `${timestampStr}${coloredLevel}${componentStr} ${message}${metaStr}`.trim();
       })
     ),
     transports: [
