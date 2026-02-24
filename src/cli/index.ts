@@ -13,8 +13,9 @@
  *   codemode-bridge config remove <name>     - Remove a server
  *   codemode-bridge config edit <name>       - Edit a server
  *   codemode-bridge config info              - Show config file information
- *   codemode-bridge auth login <url>         - Prepare to login to an OAuth server
- *   codemode-bridge auth logout <url>        - Logout from an OAuth server
+ *   codemode-bridge auth list [options]      - List OAuth-enabled servers and status
+ *   codemode-bridge auth login <name>        - Prepare to login to an OAuth server
+ *   codemode-bridge auth logout <name>       - Logout from an OAuth server
  */
 
 import { Command } from "commander";
@@ -28,6 +29,7 @@ import {
   configInfoCommand,
   authLoginCommand,
   authLogoutCommand,
+  authListCommand,
 } from "./commands.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -220,17 +222,36 @@ config
 const auth = program.command("auth").description("Manage OAuth authentication");
 
 auth
-  .command("login <server-url>")
-  .description("Prepare for login to an OAuth server (clears cached tokens)")
-  .action((serverUrl) => {
-    authLoginCommand(serverUrl);
+  .command("list")
+  .description("List all OAuth-enabled servers and their authentication status")
+  .option(
+    "-c, --config <path>",
+    "Path to mcp.json configuration file"
+  )
+  .action((options) => {
+    authListCommand(options.config);
   });
 
 auth
-  .command("logout <server-url>")
+  .command("login <server-name>")
+  .description("Initiate OAuth login for a server")
+  .option(
+    "-c, --config <path>",
+    "Path to mcp.json configuration file"
+  )
+  .action(async (serverName, options) => {
+    await authLoginCommand(serverName, options.config);
+  });
+
+auth
+  .command("logout <server-name>")
   .description("Logout from an OAuth server (clears all authentication data)")
-  .action((serverUrl) => {
-    authLogoutCommand(serverUrl);
+  .option(
+    "-c, --config <path>",
+    "Path to mcp.json configuration file"
+  )
+  .action((serverName, options) => {
+    authLogoutCommand(serverName, options.config);
   });
 
 // Default command: run if no command specified

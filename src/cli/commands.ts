@@ -24,6 +24,7 @@ import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
 import { tokenPersistence } from "../mcp/token-persistence.js";
+import { MCPClient } from "../mcp/mcp-client.js";
 
 /**
  * Run the bridge server
@@ -356,23 +357,64 @@ export function configInfoCommand(configPath?: string): void {
 /**
  * Login command for OAuth servers
  * 
- * Usage: codemode-bridge auth login <server-url>
+ * Usage: codemode-bridge auth login <server-name>
  * 
- * Clears any cached tokens for the server URL to force re-authentication.
+ * Initiates OAuth flow by connecting to the server and opening the authorization URL in a browser.
  */
-export function authLoginCommand(serverUrl: string): void {
+export async function authLoginCommand(serverName: string, configPath?: string): Promise<void> {
   try {
-    // Clear cached tokens to force re-authentication on next use
-    tokenPersistence.clearTokens(serverUrl);
+    // Initialize logger
+    initializeLogger(false);
+
+    // Load config and get server
+    const config = loadConfig(configPath);
+    const serverEntry = getServer(config, serverName);
+
+    if (!serverEntry) {
+      console.error(chalk.red("✗") + ` Server "${serverName}" not found`);
+      process.exit(1);
+    }
+
+    // Check if server has OAuth configured
+    if (!serverEntry.oauth) {
+      console.error(chalk.red("✗") + ` Server "${serverName}" does not have OAuth configured`);
+      process.exit(1);
+    }
+
+    // Only HTTP servers support OAuth
+    if (serverEntry.type !== "http") {
+      console.error(chalk.red("✗") + ` OAuth is only supported for HTTP servers (${serverName} is ${serverEntry.type})`);
+      process.exit(1);
+    }
+
+    if (!serverEntry.url) {
+      console.error(chalk.red("✗") + ` Server "${serverName}" is missing URL configuration`);
+      process.exit(1);
+    }
+
+    console.log(chalk.cyan(`\nInitiating OAuth login for ${chalk.bold(serverName)}...\n`));
+
+    // Get server config for MCP client
+    const serverConfig = getServerConfig(config, serverName);
+
+    // Create MCP client and initiate OAuth flow
+    const client = new MCPClient(serverConfig);
     
-    logInfo(`Cleared cached tokens for ${serverUrl}`, { component: 'CLI' });
-    console.log(chalk.green(`✓ Ready to login to ${serverUrl}`));
-    console.log(chalk.cyan(`\nWhen you start the bridge, you'll be prompted to authorize the connection to ${serverUrl}`));
+    console.log(chalk.cyan("Connecting to server..."));
+    await client.connect();
+
+    console.log(chalk.green(`✓ Successfully authenticated to ${serverName}`));
+    console.log(chalk.cyan(`\nTokens have been saved for future use.\n`));
+
   } catch (error) {
     logError(
-      `Failed to clear tokens for ${serverUrl}`,
+      `Failed to complete OAuth login for ${serverName}`,
       error instanceof Error ? error : { error: String(error) }
     );
+    console.error(chalk.red("\n✗ OAuth login failed"));
+    if (error instanceof Error) {
+      console.error(chalk.red(error.message));
+    }
     process.exit(1);
   }
 }
@@ -380,22 +422,133 @@ export function authLoginCommand(serverUrl: string): void {
 /**
  * Logout command for OAuth servers
  * 
- * Usage: codemode-bridge auth logout <server-url>
+ * Usage: codemode-bridge auth logout <server-name>
  * 
  * Clears all stored authentication data (tokens and client info) for the server.
  */
-export function authLogoutCommand(serverUrl: string): void {
+export function authLogoutCommand(serverName: string, configPath?: string): void {
   try {
+    // Load config and get server
+    const config = loadConfig(configPath);
+    const serverEntry = getServer(config, serverName);
+
+    if (!serverEntry) {
+      console.error(chalk.red("✗") + ` Server "${serverName}" not found`);
+      process.exit(1);
+    }
+
+    // Check if server has OAuth configured
+    if (!serverEntry.oauth) {
+      console.error(chalk.red("✗") + ` Server "${serverName}" does not have OAuth configured`);
+      process.exit(1);
+    }
+
+    // Get the server URL for token persistence
+    let serverUrl: string;
+    if (serverEntry.type === "http" && serverEntry.url) {
+      serverUrl = serverEntry.url;
+    } else {
+      // For stdio servers, use server name as key
+      serverUrl = serverName;
+    }
+
     // Clear all auth data including client information
     tokenPersistence.clearAll(serverUrl);
     
-    logInfo(`Cleared all authentication data for ${serverUrl}`, { component: 'CLI' });
-    console.log(chalk.green(`✓ Logged out from ${serverUrl}`));
+    logInfo(`Cleared all authentication data for ${serverName}`, { component: 'CLI' });
+    console.log(chalk.green(`✓ Logged out from ${serverName}`));
     console.log(chalk.cyan(`\nAll tokens and client information have been cleared.`));
   } catch (error) {
     logError(
-      `Failed to logout from ${serverUrl}`,
+      `Failed to logout from ${serverName}`,
       error instanceof Error ? error : { error: String(error) }
+    );
+    process.exit(1);
+  }
+}
+
+/**
+ * List command for OAuth servers
+ * 
+ * Usage: codemode-bridge auth list
+ * 
+ * Shows all OAuth-enabled servers and their authentication status.
+ */
+export function authListCommand(configPath?: string): void {
+  try {
+    // Load config
+    const config = loadConfig(configPath);
+    
+    // Find all OAuth-enabled servers
+    const oauthServers: Array<{
+      name: string;
+      entry: MCPServerConfigEntry;
+      serverUrl: string;
+      status: 'authenticated' | 'expired' | 'needs login';
+    }> = [];
+
+    for (const [name, entry] of Object.entries(config.servers || {})) {
+      if (entry.oauth) {
+        // Determine server URL for token lookup
+        let serverUrl: string;
+        if (entry.type === "http" && entry.url) {
+          serverUrl = entry.url;
+        } else {
+          serverUrl = name;
+        }
+
+        // Get token status
+        const tokenStatus = tokenPersistence.getTokenStatus(serverUrl);
+        let status: 'authenticated' | 'expired' | 'needs login';
+        if (tokenStatus.exists && !tokenStatus.isExpired) {
+          status = 'authenticated';
+        } else if (tokenStatus.exists && tokenStatus.isExpired) {
+          status = 'expired';
+        } else {
+          status = 'needs login';
+        }
+
+        oauthServers.push({
+          name,
+          entry,
+          serverUrl,
+          status,
+        });
+      }
+    }
+
+    // Display results
+    if (oauthServers.length === 0) {
+      console.log(chalk.yellow("No OAuth-enabled servers configured.\n"));
+      return;
+    }
+
+    console.log(chalk.cyan("\nOAuth Servers:\n"));
+
+    for (const server of oauthServers) {
+      const name = chalk.bold(server.name);
+      
+      let statusColor: (text: string) => string;
+      switch (server.status) {
+        case 'authenticated':
+          statusColor = chalk.green;
+          break;
+        case 'expired':
+          statusColor = chalk.yellow;
+          break;
+        default:
+          statusColor = chalk.gray;
+      }
+
+      console.log(`${name} (${server.entry.type})${chalk.dim(` - ${statusColor(server.status)}`)}`);
+    }
+
+    console.log();
+  } catch (error) {
+    console.error(
+      chalk.red("✗") +
+        " Error: " +
+        (error instanceof Error ? error.message : String(error))
     );
     process.exit(1);
   }
