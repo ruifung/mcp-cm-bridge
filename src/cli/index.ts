@@ -13,6 +13,8 @@
  *   codemode-bridge config remove <name>     - Remove a server
  *   codemode-bridge config edit <name>       - Edit a server
  *   codemode-bridge config info              - Show config file information
+ *   codemode-bridge auth login <url>         - Prepare to login to an OAuth server
+ *   codemode-bridge auth logout <url>        - Logout from an OAuth server
  */
 
 import { Command } from "commander";
@@ -24,6 +26,8 @@ import {
   removeServerCommand,
   editServerCommand,
   configInfoCommand,
+  authLoginCommand,
+  authLogoutCommand,
 } from "./commands.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -202,14 +206,31 @@ config
   });
 
 config
-  .command("info")
-  .description("Show configuration file information")
-  .option(
-    "-c, --config <path>",
-    "Path to mcp.json configuration file"
-  )
-  .action((options) => {
-    configInfoCommand(options.config);
+   .command("info")
+   .description("Show configuration file information")
+   .option(
+     "-c, --config <path>",
+     "Path to mcp.json configuration file"
+   )
+   .action((options) => {
+     configInfoCommand(options.config);
+   });
+
+// Auth command group
+const auth = program.command("auth").description("Manage OAuth authentication");
+
+auth
+  .command("login <server-url>")
+  .description("Prepare for login to an OAuth server (clears cached tokens)")
+  .action((serverUrl) => {
+    authLoginCommand(serverUrl);
+  });
+
+auth
+  .command("logout <server-url>")
+  .description("Logout from an OAuth server (clears all authentication data)")
+  .action((serverUrl) => {
+    authLogoutCommand(serverUrl);
   });
 
 // Default command: run if no command specified

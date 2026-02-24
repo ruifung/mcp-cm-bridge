@@ -23,6 +23,7 @@ import { startCodeModeBridgeServer, type MCPServerConfig } from "../mcp/server.j
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
+import { tokenPersistence } from "../mcp/token-persistence.js";
 
 /**
  * Run the bridge server
@@ -346,8 +347,56 @@ export function configInfoCommand(configPath?: string): void {
   if (configPath) {
     console.log(`\n${chalk.yellow("ℹ")} Using custom config path`);
   } else {
-    console.log(`\n${chalk.yellow("ℹ")} Using default config path`);
+  console.log(`\n${chalk.yellow("ℹ")} Using default config path`);
   }
 
   console.log();
+}
+
+/**
+ * Login command for OAuth servers
+ * 
+ * Usage: codemode-bridge auth login <server-url>
+ * 
+ * Clears any cached tokens for the server URL to force re-authentication.
+ */
+export function authLoginCommand(serverUrl: string): void {
+  try {
+    // Clear cached tokens to force re-authentication on next use
+    tokenPersistence.clearTokens(serverUrl);
+    
+    logInfo(`Cleared cached tokens for ${serverUrl}`, { component: 'CLI' });
+    console.log(chalk.green(`✓ Ready to login to ${serverUrl}`));
+    console.log(chalk.cyan(`\nWhen you start the bridge, you'll be prompted to authorize the connection to ${serverUrl}`));
+  } catch (error) {
+    logError(
+      `Failed to clear tokens for ${serverUrl}`,
+      error instanceof Error ? error : { error: String(error) }
+    );
+    process.exit(1);
+  }
+}
+
+/**
+ * Logout command for OAuth servers
+ * 
+ * Usage: codemode-bridge auth logout <server-url>
+ * 
+ * Clears all stored authentication data (tokens and client info) for the server.
+ */
+export function authLogoutCommand(serverUrl: string): void {
+  try {
+    // Clear all auth data including client information
+    tokenPersistence.clearAll(serverUrl);
+    
+    logInfo(`Cleared all authentication data for ${serverUrl}`, { component: 'CLI' });
+    console.log(chalk.green(`✓ Logged out from ${serverUrl}`));
+    console.log(chalk.cyan(`\nAll tokens and client information have been cleared.`));
+  } catch (error) {
+    logError(
+      `Failed to logout from ${serverUrl}`,
+      error instanceof Error ? error : { error: String(error) }
+    );
+    process.exit(1);
+  }
 }
