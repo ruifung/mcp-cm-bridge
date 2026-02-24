@@ -252,6 +252,10 @@ The bridge comes pre-configured with popular MCP servers:
 
 Run `codemode-bridge config list` to see all available servers.
 
-## License
+## AI Generated Code Disclosure
+For anyone wondering, yes, this is almost entirely AI generated code. Though I consider it of fairly low risk given that it's sole purpose is to
+1. Run JS code in a VM2 environment.
+2. Bridge MCP servers to the VM2 sandbox.
+3. Most of this is built on top of existing libraries.
 
-ISC
+I have not (yet) tested this extensively to see what the VM2 sandbox capabilities are. This is more of an experiment I had going in the background during the workday to see if I could get cloudflare's Code Mode to work... without paying for workers.
