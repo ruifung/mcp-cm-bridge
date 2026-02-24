@@ -10,7 +10,7 @@ An MCP (Model Context Protocol) server that connects to upstream MCP servers and
 - **Namespaced tools**: Tools are automatically namespaced by server (e.g., `kubernetes__pods_list`)
 - **Sandbox execution**: Code runs in isolated vm2 sandbox with 30-second timeout
 - **CLI management**: Easy command-line interface for server configuration
-- **npx compatible**: Run directly with `npx codemode-bridge`
+- ~~**npx compatible**: Run directly with `npx codemode-bridge`~~
 
 ## Quick Start
 
