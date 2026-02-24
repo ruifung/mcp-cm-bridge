@@ -302,6 +302,74 @@ export class MCPClient {
   }
 
   /**
+   * Authenticate with OAuth server and obtain tokens without connecting the full client.
+   * This is useful for CLI auth flows where we just want to get tokens without initializing
+   * the full MCP client.
+   */
+  async authenticateOAuth(): Promise<void> {
+    if (!this.config.oauth || !this.config.url) {
+      throw new Error("OAuth not configured for this server");
+    }
+
+    if (this.config.type !== "http") {
+      throw new Error("OAuth is only supported for HTTP servers");
+    }
+
+    // Create OAuth provider if not already created
+    if (!this.oauthProvider) {
+      this.oauthProvider = new SimpleOAuthProvider(this.config.oauth, this.config.url);
+    }
+
+    const provider = this.oauthProvider as SimpleOAuthProvider;
+    const currentTokens = provider.tokens();
+
+    if (currentTokens) {
+      logDebug('OAuth tokens already available, skipping OAuth flow', { component: 'HTTP' });
+      return;
+    }
+
+    // Create HTTP transport for OAuth flow
+    const httpTransport = new StreamableHTTPClientTransport(
+      new URL(this.config.url),
+      { authProvider: provider }
+    );
+
+    // Set up the callback for OAuth code exchange
+    provider.setFinishAuthCallback(
+      async (authorizationCode: string) => {
+        logDebug('Exchanging authorization code for tokens...', { component: 'OAuth' });
+        await httpTransport.finishAuth(authorizationCode);
+        logDebug('Authorization code exchanged successfully', { component: 'OAuth' });
+      }
+    );
+
+    // Trigger OAuth flow by initiating auth
+    // The provider's redirectToAuthorization will be called by finishAuth
+    try {
+      // Create a minimal client just to trigger the auth flow
+      const tempClient = new Client(
+        {
+          name: `codemode-bridge-oauth-${this.config.name}`,
+          version: "1.0.0",
+        },
+        {
+          capabilities: {},
+        }
+      );
+
+      // This will trigger the OAuth flow
+      await tempClient.connect(httpTransport);
+
+      logDebug('OAuth authentication completed successfully', { component: 'OAuth' });
+    } finally {
+      // Clean up the transport
+      if (httpTransport) {
+        await httpTransport.close();
+      }
+    }
+  }
+
+  /**
    * Connect to the upstream MCP server
    */
   async connect(): Promise<void> {

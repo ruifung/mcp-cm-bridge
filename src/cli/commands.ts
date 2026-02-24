@@ -395,8 +395,8 @@ export async function authLoginCommand(serverName: string, configPath?: string):
 
     console.log(chalk.cyan(`\nAuthenticating with ${chalk.bold(serverName)}...\n`));
     
-    // Create an MCP client directly for this server
-    // This triggers the OAuth flow without starting the full bridge
+    // Create an MCP client for OAuth authentication
+    // This will handle the OAuth flow without fully connecting the client
     const mcpConfig: MCPServerConfig = {
       name: serverName,
       type: serverEntry.type,
@@ -406,20 +406,20 @@ export async function authLoginCommand(serverName: string, configPath?: string):
 
     const client = new MCPClient(mcpConfig);
     
-    // Connect - this will trigger OAuth flow if tokens are not available
-    logInfo(`Connecting to ${serverName} for OAuth authentication`, { component: 'CLI' });
-    await client.connect();
+    // Authenticate via OAuth - this triggers browser authorization and token exchange
+    logInfo(`Starting OAuth authentication for ${serverName}`, { component: 'CLI' });
+    await client.authenticateOAuth();
     
     // OAuth flow is complete and tokens are saved
-    console.log(chalk.green('\n✓ OAuth login completed. Tokens have been saved.\n'));
+    console.log(chalk.green('\n✓ Authentication successful. Tokens have been saved.\n'));
     process.exit(0);
 
   } catch (error) {
     logError(
-      `Failed to complete OAuth login for ${serverName}`,
+      `Failed to complete OAuth authentication for ${serverName}`,
       error instanceof Error ? error : { error: String(error) }
     );
-    console.error(chalk.red("\n✗ OAuth login failed"));
+    console.error(chalk.red("\n✗ Authentication failed"));
     if (error instanceof Error) {
       console.error(chalk.red(error.message));
     }
