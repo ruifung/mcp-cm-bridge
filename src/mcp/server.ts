@@ -2,38 +2,29 @@
  * MCP Server - Exposes the Code Mode bridge as an MCP server
  * 
  * Architecture:
- * - Upstream: Use AI SDK's createMCPClient() to connect to and collect tools from other MCP servers
+ * - Upstream: Use official MCP SDK's Client to connect to and collect tools from other MCP servers
  * - Orchestration: Pass collected tools to codemode SDK's createCodeTool()
  * - Downstream: Use MCP SDK to expose the codemode tool via MCP protocol (stdio transport)
  * 
  * This server:
- * 1. Connects to upstream MCP servers using AI SDK's createMCPClient()
- * 2. Collects tools from all upstream servers
- * 3. Uses @cloudflare/codemode SDK to create the "codemode" tool with those tools
- * 4. Adapts the codemode SDK's AI SDK Tool to MCP protocol using a shim layer
- * 5. Exposes the "codemode" tool via MCP protocol downstream
+ * 1. Connects to upstream MCP servers using official MCP SDK Client
+ * 2. Collects tools from all upstream servers in native MCP format (JSON Schema)
+ * 3. Converts tools to ToolDescriptor format (with Zod schemas)
+ * 4. Uses @cloudflare/codemode SDK to create the "codemode" tool with those tools
+ * 5. Adapts the codemode SDK's AI SDK Tool to MCP protocol using a shim layer
+ * 6. Exposes the "codemode" tool via MCP protocol downstream
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodeTool } from "@cloudflare/codemode/ai";
-import { createMCPClient } from "@ai-sdk/mcp";
-import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
 import { z } from "zod";
 import { createExecutor } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
+import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 
-/**
- * Configuration for an MCP server to connect to upstream
- */
-export interface MCPServerConfig {
-  name: string;
-  type: "stdio" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-  env?: Record<string, string>;
-}
+// Re-export MCPServerConfig for backwards compatibility
+export type { MCPServerConfig }
 
 /**
  * Convert JSON Schema to Zod schema
@@ -218,14 +209,18 @@ function jsonSchemaToZod(schema: any): z.ZodType<any> {
 }
 
 /**
- * Convert MCP raw tool definitions to ToolDescriptor format
+ * Convert native MCP tool definitions to ToolDescriptor format
  * that createCodeTool() expects
  */
-function convertMCPToolToDescriptor(toolDef: any): any {
+function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolName: string): any {
   return {
     description: toolDef.description || "",
     inputSchema: jsonSchemaToZod(toolDef.inputSchema),
-    execute: toolDef.execute, // Pass through the execute function from AI SDK tool
+    execute: async (args: any) => {
+      // Execute the tool on the upstream server using the MCP client
+      const result = await client.callTool(toolName, args);
+      return result;
+    },
   };
 }
 
@@ -237,66 +232,38 @@ export async function startCodeModeBridgeServer(
     version: "1.0.0",
   });
 
-  // Collect all tools from upstream MCP servers using AI SDK's MCP client
-  const allAISDKTools: Record<string, any> = {};
+  // Collect all tools from upstream MCP servers using official MCP SDK
+  const allToolDescriptors: Record<string, any> = {};
+  const mcpClients: MCPClient[] = []; // Keep track of clients for cleanup
   let totalToolCount = 0;
 
   for (const config of serverConfigs) {
     try {
-      // Create client for this upstream MCP server using AI SDK
-      let transport;
+      // Create client for this upstream MCP server using official SDK
+      const client = new MCPClient(config);
       
-        if (config.type === "stdio") {
-          if (!config.command) {
-            console.error(
-              `[Bridge] Skipping "${config.name}": stdio type requires "command" field`
-            );
-            continue;
-          }
-          
-          // Merge provided env vars with current process env, filtering out undefined values
-          const baseEnv = Object.fromEntries(
-            Object.entries(process.env).filter(([, v]) => v !== undefined) as Array<[string, string]>
-          );
-          const env = config.env ? { ...baseEnv, ...config.env } : baseEnv;
-          
-          transport = new Experimental_StdioMCPTransport({
-            command: config.command,
-            args: config.args || [],
-            env,
-          });
-        } else {
-        console.error(
-          `[Bridge] Skipping "${config.name}": unsupported transport type "${config.type}"`
-        );
-        continue;
-      }
+      // Connect to the upstream server
+      await client.connect();
+      mcpClients.push(client);
 
-      // Create AI SDK MCP client for this server
-      const client = await createMCPClient({
-        name: `codemode-bridge-client-${config.name}`,
-        transport,
-      });
-
-      // Get tools from this server
-      const serverTools = await client.tools();
-      const toolCount = Object.keys(serverTools).length;
+      // Get tools from this server in native MCP format (JSON Schema)
+      const serverTools = await client.listTools();
+      const toolCount = serverTools.length;
       totalToolCount += toolCount;
 
       console.error(
         `[Bridge] Server "${config.name}" has ${toolCount} tools`
       );
 
-       // Namespace tools by server name to avoid conflicts
-       // e.g., kubernetes.get_pod -> kubernetes__get_pod
-       // The tools from client.tools() are already AI SDK Tools with execute functions
-       // Convert them to ToolDescriptor format for createCodeTool
-       for (const [toolName, tool] of Object.entries(serverTools)) {
-         const namespacedName = `${config.name}__${toolName}`;
-         // Convert the AI SDK tool to a ToolDescriptor format
-         const descriptor = convertMCPToolToDescriptor(tool);
-         allAISDKTools[namespacedName] = descriptor;
-       }
+      // Namespace tools by server name to avoid conflicts
+      // e.g., kubernetes.get_pod -> kubernetes__get_pod
+      // Convert native MCP tools (JSON Schema) to ToolDescriptor format (Zod)
+      for (const tool of serverTools) {
+        const namespacedName = `${config.name}__${tool.name}`;
+        // Convert the native MCP tool to ToolDescriptor format
+        const descriptor = convertMCPToolToDescriptor(tool, client, tool.name);
+        allToolDescriptors[namespacedName] = descriptor;
+      }
     } catch (error) {
       console.error(
         `[Bridge] Failed to connect to "${config.name}": ${
@@ -315,10 +282,10 @@ export async function startCodeModeBridgeServer(
   const executor = createExecutor(30000); // 30 second timeout
 
   // Create the codemode tool using the codemode SDK
-  // tools from client.tools() are already in AI SDK format
-  console.error("[Bridge] Creating codemode tool with tools:", Object.keys(allAISDKTools));
+  // Pass ToolDescriptor format (with Zod schemas and execute functions)
+  console.error("[Bridge] Creating codemode tool with tools:", Object.keys(allToolDescriptors));
   const codemodeTool = createCodeTool({
-    tools: allAISDKTools,
+    tools: allToolDescriptors,
     executor,
     // Let the SDK auto-generate description from available tools
   });

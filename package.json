@@ -27,12 +27,9 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@ai-sdk/mcp": "^1.0.21",
-    "@ai-sdk/openai": "^3.0.31",
     "@cloudflare/codemode": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.0",
     "@types/node": "^25.3.0",
-    "ai": "^6.0.97",
     "chalk": "^5.6.2",
     "commander": "^12.1.0",
     "ts-node": "^10.9.2",
