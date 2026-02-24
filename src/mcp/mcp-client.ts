@@ -328,43 +328,69 @@ export class MCPClient {
       return;
     }
 
+    logDebug('No tokens available, initiating OAuth flow', { component: 'OAuth' });
+
     // Create HTTP transport for OAuth flow
     const httpTransport = new StreamableHTTPClientTransport(
       new URL(this.config.url),
       { authProvider: provider }
     );
 
-    // Set up the callback for OAuth code exchange
-    provider.setFinishAuthCallback(
-      async (authorizationCode: string) => {
-        logDebug('Exchanging authorization code for tokens...', { component: 'OAuth' });
-        await httpTransport.finishAuth(authorizationCode);
-        logDebug('Authorization code exchanged successfully', { component: 'OAuth' });
-      }
-    );
-
-    // Trigger OAuth flow by initiating auth
-    // The provider's redirectToAuthorization will be called by finishAuth
     try {
-      // Create a minimal client just to trigger the auth flow
-      const tempClient = new Client(
-        {
-          name: `codemode-bridge-oauth-${this.config.name}`,
-          version: "1.0.0",
-        },
-        {
-          capabilities: {},
+      // Set up the callback for OAuth code exchange BEFORE connecting
+      provider.setFinishAuthCallback(
+        async (authorizationCode: string) => {
+          logDebug('Exchanging authorization code for tokens...', { component: 'OAuth' });
+          logDebug(`Authorization code: ${authorizationCode.substring(0, 20)}...`, { component: 'OAuth' });
+          try {
+            await httpTransport.finishAuth(authorizationCode);
+            logDebug('Authorization code exchanged successfully', { component: 'OAuth' });
+          } catch (error) {
+            logDebug(`Token exchange failed: ${error instanceof Error ? error.message : String(error)}`, { component: 'OAuth' });
+            throw error;
+          }
         }
       );
 
-      // This will trigger the OAuth flow
-      await tempClient.connect(httpTransport);
+      // Try to make a request to trigger OAuth
+      // This will fail with 401, which should trigger the auth provider's OAuth flow
+      try {
+        await httpTransport.send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: {
+              name: `codemode-bridge-oauth-${this.config.name}`,
+              version: '1.0.0',
+            },
+          },
+        });
+      } catch (error) {
+        // Expected - will trigger OAuth or be a real error
+        logDebug(`Initial request result: ${error instanceof Error ? error.message : String(error)}`, { component: 'OAuth' });
+        // Don't rethrow - the OAuth flow may have been triggered
+      }
 
-      logDebug('OAuth authentication completed successfully', { component: 'OAuth' });
+      // Wait a moment for OAuth flow to complete
+      // If tokens were saved, we're done
+      const tokensAfterOAuth = provider.tokens();
+      if (tokensAfterOAuth) {
+        logDebug('Tokens obtained successfully via OAuth', { component: 'OAuth' });
+        return;
+      }
+
+      throw new Error('OAuth authentication did not produce tokens');
     } finally {
       // Clean up the transport
       if (httpTransport) {
-        await httpTransport.close();
+        try {
+          await httpTransport.close();
+        } catch (e) {
+          logDebug(`Error closing transport: ${e instanceof Error ? e.message : String(e)}`, { component: 'OAuth' });
+        }
       }
     }
   }
