@@ -16,7 +16,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { tokenPersistence } from "./token-persistence.js";
-import { logDebug } from "../utils/logger.js";
+import { logDebug, logInfo } from "../utils/logger.js";
 
 /**
  * OAuth2 configuration for HTTP/SSE transports
@@ -267,15 +267,30 @@ export class MCPClient {
       );
       const env = this.config.env ? { ...baseEnv, ...this.config.env } : baseEnv;
 
-      // Set stderr to 'inherit' so it goes to parent's stderr (will be captured by our logger)
-      // This allows stdio tools to output debug info that will be visible
-      this.transport = new StdioClientTransport({
+      // Create stdio transport with stderr piped so we can capture and log it
+      const stdioTransport = new StdioClientTransport({
         command: this.config.command,
         args: this.config.args || [],
         env,
-        stderr: 'inherit',
+        stderr: 'pipe',
       });
 
+      // Attach stderr handler to capture tool output and pass through logger
+      if (stdioTransport.stderr) {
+        stdioTransport.stderr.on('data', (data: Buffer) => {
+          const lines = data.toString().split('\n').filter(line => line.trim());
+          for (const line of lines) {
+            logInfo(line, { component: this.config.name });
+          }
+        });
+        stdioTransport.stderr.on('error', (error: Error) => {
+          logDebug(`stderr error from ${this.config.name}: ${error.message}`, {
+            component: this.config.name
+          });
+        });
+      }
+
+      this.transport = stdioTransport;
       await this.client.connect(this.transport);
       this.connected = true;
     } else if (this.config.type === "http") {
