@@ -10,6 +10,8 @@ import chalk from 'chalk';
 
 let logger: winston.Logger;
 let debugMode = false;
+let stderrBufferingEnabled = false;
+let stderrBuffer: Array<{ message: string; meta?: Record<string, any> }> = [];
 
 /**
  * Initialize the logger
@@ -81,10 +83,35 @@ export function isDebugEnabled(): boolean {
 }
 
 /**
+ * Enable buffering of stderr output from stdio tools
+ * Useful for deferring tool output until after startup is complete
+ */
+export function enableStderrBuffering(): void {
+  stderrBufferingEnabled = true;
+  stderrBuffer = [];
+}
+
+/**
+ * Disable buffering and flush all buffered stderr messages
+ */
+export function flushStderrBuffer(): void {
+  stderrBufferingEnabled = false;
+  for (const { message, meta } of stderrBuffer) {
+    logInfo(message, meta);
+  }
+  stderrBuffer = [];
+}
+
+/**
  * Log an info message
  */
 export function logInfo(message: string, meta?: Record<string, any>): void {
-  getLogger().info(message, meta);
+  // Buffer stderr output from stdio tools during startup if buffering is enabled
+  if (stderrBufferingEnabled && meta?.component && meta.component !== 'Bridge') {
+    stderrBuffer.push({ message, meta });
+  } else {
+    getLogger().info(message, meta);
+  }
 }
 
 /**

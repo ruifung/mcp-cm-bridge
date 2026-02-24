@@ -22,7 +22,7 @@ import { z } from "zod";
 import { createExecutor } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
-import { logDebug, logError, logInfo } from "../utils/logger.js";
+import { logDebug, logError, logInfo, enableStderrBuffering, flushStderrBuffer } from "../utils/logger.js";
 
 // Re-export MCPServerConfig for backwards compatibility
 export type { MCPServerConfig }
@@ -256,6 +256,9 @@ function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolNam
 export async function startCodeModeBridgeServer(
   serverConfigs: MCPServerConfig[]
 ) {
+  // Enable buffering of stderr output from stdio tools during startup
+  enableStderrBuffering();
+
   const mcp = new McpServer({
     name: "codemode-bridge",
     version: "1.0.0",
@@ -314,6 +317,9 @@ export async function startCodeModeBridgeServer(
 
   // Wait for all connections to initialize in parallel
   const results = await Promise.all(connectionPromises);
+
+  // Flush buffered stderr output from stdio tools now that startup is complete
+  flushStderrBuffer();
 
   // Recalculate total tool count from results (in case totalToolCount wasn't updated due to timing)
   totalToolCount = results.reduce((sum, result) => sum + (result?.toolCount || 0), 0);
