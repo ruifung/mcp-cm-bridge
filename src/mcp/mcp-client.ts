@@ -16,6 +16,8 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientMetadata, OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { tokenPersistence } from "./token-persistence.js";
+import { logDebug } from "../utils/logger.js";
+import { PassThrough } from "stream";
 
 /**
  * OAuth2 configuration for HTTP/SSE transports
@@ -75,24 +77,24 @@ class SimpleOAuthProvider implements OAuthClientProvider {
   private _discoveryState?: OAuthDiscoveryState;
 
   constructor(private config: OAuth2Config, private serverUrl: string) {
-    console.log(`[OAuth] Creating provider for ${serverUrl}`);
+    logDebug(`Creating provider for ${serverUrl}`, { component: 'OAuth' });
     
     // Load tokens from persistence on initialization
     const persistedTokens = tokenPersistence.getTokens(serverUrl);
     if (persistedTokens) {
       this._tokens = persistedTokens;
-      console.log(`[OAuth] Loaded persisted tokens for ${serverUrl}`);
+      logDebug(`Loaded persisted tokens for ${serverUrl}`, { component: 'OAuth' });
     } else {
-      console.log(`[OAuth] No persisted tokens found for ${serverUrl}`);
+      logDebug(`No persisted tokens found for ${serverUrl}`, { component: 'OAuth' });
     }
     
     // Load client information from persistence
     const persistedClientInfo = tokenPersistence.getClientInformation(serverUrl);
     if (persistedClientInfo) {
       this._clientInfo = persistedClientInfo;
-      console.log(`[OAuth] Loaded persisted client info for ${serverUrl}`);
+      logDebug(`Loaded persisted client info for ${serverUrl}`, { component: 'OAuth' });
     } else {
-      console.log(`[OAuth] No persisted client info found for ${serverUrl}`);
+      logDebug(`No persisted client info found for ${serverUrl}`, { component: 'OAuth' });
     }
   }
 
@@ -140,50 +142,50 @@ class SimpleOAuthProvider implements OAuthClientProvider {
     this._clientInfo = clientInformation;
     // Also persist to disk
     tokenPersistence.saveClientInformation(this.serverUrl, clientInformation);
-    console.log('OAuth client dynamically registered:', clientInformation.client_id);
+    logDebug(`Client dynamically registered: ${clientInformation.client_id}`, { component: 'OAuth' });
   }
 
   tokens(): OAuthTokens | undefined {
     // First try in-memory tokens
     if (this._tokens) {
-      console.log('[OAuth] tokens() returning in-memory tokens');
+      logDebug('tokens() returning in-memory tokens', { component: 'OAuth' });
       return this._tokens;
     }
     
     // Fallback to persistence if memory is empty
-    console.log('[OAuth] tokens() checking persistence...');
+    logDebug('tokens() checking persistence...', { component: 'OAuth' });
     const persistedTokens = tokenPersistence.getTokens(this.serverUrl);
     if (persistedTokens) {
       this._tokens = persistedTokens;
-      console.log(`[OAuth] tokens() returning persisted tokens for ${this.serverUrl}`);
+      logDebug(`tokens() returning persisted tokens for ${this.serverUrl}`, { component: 'OAuth' });
       return persistedTokens;
     }
     
-    console.log('[OAuth] tokens() returning undefined - no tokens available');
+    logDebug('tokens() returning undefined - no tokens available', { component: 'OAuth' });
     return undefined;
   }
 
   saveTokens(tokens: OAuthTokens): void {
-    console.log(`[OAuth] saveTokens() called for ${this.serverUrl}`);
+    logDebug(`saveTokens() called for ${this.serverUrl}`, { component: 'OAuth' });
     this._tokens = tokens;
     // Also persist tokens to disk
     tokenPersistence.saveTokens(this.serverUrl, tokens);
-    console.log(`[OAuth] Tokens saved to persistence`);
+    logDebug('Tokens saved to persistence', { component: 'OAuth' });
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
     const { open } = require('open');
     
-    console.log('\n=== OAuth Authorization Required ===');
-    console.log(`Server: ${this.serverUrl}`);
-    console.log('Opening browser for authorization...');
-    console.log('URL:', authorizationUrl.toString());
+    logDebug('=== OAuth Authorization Required ===', { component: 'OAuth' });
+    logDebug(`Server: ${this.serverUrl}`, { component: 'OAuth' });
+    logDebug('Opening browser for authorization...', { component: 'OAuth' });
+    logDebug(`URL: ${authorizationUrl.toString()}`, { component: 'OAuth' });
     
     // Open in default browser
     open(authorizationUrl.toString()).catch((err: Error) => {
-      console.log('Could not open browser automatically.');
-      console.log('Please visit this URL to authorize:');
-      console.log(authorizationUrl.toString());
+      logDebug('Could not open browser automatically.', { component: 'OAuth' });
+      logDebug('Please visit this URL to authorize:', { component: 'OAuth' });
+      logDebug(authorizationUrl.toString(), { component: 'OAuth' });
     });
   }
 
@@ -266,10 +268,22 @@ export class MCPClient {
       );
       const env = this.config.env ? { ...baseEnv, ...this.config.env } : baseEnv;
 
+      // Create a pass-through stream to capture stderr from the child process
+      const stderrCapture = new PassThrough();
+      
+      stderrCapture.on('data', (chunk: Buffer) => {
+        // Log stderr in real-time
+        const text = chunk.toString('utf-8').trim();
+        if (text) {
+          logDebug(`[${this.config.name}] ${text}`, { component: 'Stdio Tool' });
+        }
+      });
+
       this.transport = new StdioClientTransport({
         command: this.config.command,
         args: this.config.args || [],
         env,
+        stderr: stderrCapture,
       });
 
       await this.client.connect(this.transport);
@@ -281,15 +295,15 @@ export class MCPClient {
 
       // Create HTTP transport using Streamable HTTP with optional OAuth
       if (this.oauthProvider) {
-        console.log(`[HTTP] Connecting with OAuth provider to ${this.config.url}`);
+        logDebug(`Connecting with OAuth provider to ${this.config.url}`, { component: 'HTTP' });
         const currentTokens = this.oauthProvider.tokens();
         if (currentTokens) {
-          console.log(`[HTTP] OAuth tokens available`);
+          logDebug('OAuth tokens available', { component: 'HTTP' });
         } else {
-          console.log('[HTTP] WARNING: No OAuth tokens available');
+          logDebug('WARNING: No OAuth tokens available', { component: 'HTTP' });
         }
       } else {
-        console.log(`[HTTP] Connecting without OAuth to ${this.config.url}`);
+        logDebug(`Connecting without OAuth to ${this.config.url}`, { component: 'HTTP' });
       }
 
       this.transport = new StreamableHTTPClientTransport(
@@ -338,12 +352,36 @@ export class MCPClient {
       throw new Error("Client not connected. Call connect() first.");
     }
 
-    const response = await this.client.callTool({
-      name,
-      arguments: args,
+    logDebug(`Invoking upstream tool: ${name}`, {
+      component: 'MCP Client',
+      transport: this.config.type,
+      server: this.config.name,
+      argsSize: JSON.stringify(args).length
     });
 
-    return response;
+    try {
+      const response = await this.client.callTool({
+        name,
+        arguments: args,
+      });
+
+      logDebug(`Upstream tool completed: ${name}`, {
+        component: 'MCP Client',
+        transport: this.config.type,
+        server: this.config.name,
+        resultType: typeof response
+      });
+
+      return response;
+    } catch (error) {
+      logDebug(`Upstream tool failed: ${name}`, {
+        component: 'MCP Client',
+        transport: this.config.type,
+        server: this.config.name,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
 
   /**

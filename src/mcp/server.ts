@@ -22,6 +22,7 @@ import { z } from "zod";
 import { createExecutor } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
+import { logDebug } from "../utils/logger.js";
 
 // Re-export MCPServerConfig for backwards compatibility
 export type { MCPServerConfig }
@@ -212,14 +213,42 @@ function jsonSchemaToZod(schema: any): z.ZodType<any> {
  * Convert native MCP tool definitions to ToolDescriptor format
  * that createCodeTool() expects
  */
-function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolName: string): any {
+function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolName: string, serverName: string): any {
   return {
     description: toolDef.description || "",
     inputSchema: jsonSchemaToZod(toolDef.inputSchema),
     execute: async (args: any) => {
-      // Execute the tool on the upstream server using the MCP client
-      const result = await client.callTool(toolName, args);
-      return result;
+      // Log the tool invocation
+      logDebug(`Calling tool: ${serverName}__${toolName}`, {
+        component: 'Tool Execution',
+        server: serverName,
+        tool: toolName,
+        args: JSON.stringify(args)
+      });
+
+      try {
+        // Execute the tool on the upstream server using the MCP client
+        const result = await client.callTool(toolName, args);
+        
+        // Log successful execution
+        logDebug(`Tool completed: ${serverName}__${toolName}`, {
+          component: 'Tool Execution',
+          server: serverName,
+          tool: toolName,
+          resultType: typeof result,
+          resultSize: JSON.stringify(result).length
+        });
+
+        return result;
+      } catch (error) {
+        logDebug(`Tool failed: ${serverName}__${toolName}`, {
+          component: 'Tool Execution',
+          server: serverName,
+          tool: toolName,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
     },
   };
 }
@@ -261,7 +290,7 @@ export async function startCodeModeBridgeServer(
       for (const tool of serverTools) {
         const namespacedName = `${config.name}__${tool.name}`;
         // Convert the native MCP tool to ToolDescriptor format
-        const descriptor = convertMCPToolToDescriptor(tool, client, tool.name);
+        const descriptor = convertMCPToolToDescriptor(tool, client, tool.name, config.name);
         allToolDescriptors[namespacedName] = descriptor;
       }
     } catch (error) {

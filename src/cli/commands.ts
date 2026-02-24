@@ -22,15 +22,20 @@ import {
 import { startCodeModeBridgeServer, type MCPServerConfig } from "../mcp/server.js";
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
+import { initializeLogger } from "../utils/logger.js";
 
 /**
  * Run the bridge server
  */
 export async function runServer(
   configPath?: string,
-  servers?: string[]
+  servers?: string[],
+  debug?: boolean
 ): Promise<void> {
   try {
+    // Initialize logger with debug mode if requested
+    initializeLogger(debug);
+
     console.error(chalk.cyan("\n🚀 Code Mode Bridge"));
     console.error(chalk.cyan("====================\n"));
 

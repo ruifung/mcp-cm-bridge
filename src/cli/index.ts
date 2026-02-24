@@ -48,9 +48,13 @@ program
     "-s, --servers <names>",
     "Comma-separated list of servers to connect to"
   )
+  .option(
+    "-d, --debug",
+    "Enable debug logging"
+  )
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
-    await runServer(options.config, servers);
+    await runServer(options.config, servers, options.debug);
   });
 
 // Config command group
@@ -213,7 +217,7 @@ program.action(async () => {
   // If no command is specified, run the bridge
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    await runServer();
+    await runServer(undefined, undefined, false);
   }
 });
 
