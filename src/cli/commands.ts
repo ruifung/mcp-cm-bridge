@@ -207,7 +207,7 @@ export function addServerCommand(
 
     if (options.type === "stdio") {
       if (!options.command) {
-        console.error(chalk.red("✗") + ' Missing --command for stdio server');
+        console.error(chalk.red("✗") + " Missing command for stdio server");
         process.exit(1);
       }
       entry.command = options.command;
@@ -216,7 +216,7 @@ export function addServerCommand(
       }
     } else if (options.type === "http") {
       if (!options.url) {
-        console.error(chalk.red("✗") + ' Missing --url for http server');
+        console.error(chalk.red("✗") + " Missing --url for http server");
         process.exit(1);
       }
       entry.url = options.url;
@@ -348,7 +348,7 @@ export function configInfoCommand(configPath?: string): void {
   if (configPath) {
     console.log(`\n${chalk.yellow("ℹ")} Using custom config path`);
   } else {
-  console.log(`\n${chalk.yellow("ℹ")} Using default config path`);
+    console.log(`\n${chalk.yellow("ℹ")} Using default config path`);
   }
 
   console.log();

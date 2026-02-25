@@ -31,6 +31,7 @@ import {
   authLogoutCommand,
   authListCommand,
 } from "./commands.js";
+import { getConfigFilePath } from "./config-manager.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -38,17 +39,22 @@ const pkg = JSON.parse(
   fs.readFileSync(new URL("../../package.json", import.meta.url), "utf-8")
 );
 
+const defaultConfigPath = getConfigFilePath();
+
 const program = new Command();
 
-program.name("codemode-bridge").description("Code Mode Bridge CLI").version(pkg.version);
+program
+  .name("codemode-bridge")
+  .description("Code Mode Bridge CLI - Connects to multiple MCP servers and exposes them as a single tool")
+  .version(pkg.version);
 
 // Main 'run' command
 program
-  .command("run")
+  .command("run", { isDefault: true })
   .description("Start the bridge MCP server (default command)")
   .option(
     "-c, --config <path>",
-    "Path to mcp.json configuration file (default: ~/.config/codemode-bridge/mcp.json)"
+    `Path to mcp.json configuration file (default: ${defaultConfigPath})`
   )
   .option(
     "-s, --servers <names>",
@@ -78,7 +84,7 @@ config
   });
 
 config
-  .command("show <name>")
+  .command("show <server-name>")
   .description("Show a server configuration")
   .option(
     "-c, --config <path>",
@@ -89,7 +95,7 @@ config
   });
 
 config
-  .command("add <name> [commandAndArgs...]")
+  .command("add <server-name> [commandAndArgs...]")
   .description("Add a new server configuration (use -- before commands with flags, e.g. -- npx -y @some/pkg)")
   .passThroughOptions()
   .requiredOption(
@@ -108,6 +114,13 @@ config
     "-c, --config <path>",
     "Path to mcp.json configuration file"
   )
+  .addHelpText("after", `
+Examples:
+  $ codemode-bridge config add my-server --type stdio node /path/to/server.js
+  $ codemode-bridge config add remote-server --type http --url https://api.example.com/mcp
+  $ codemode-bridge config add secure-server --type stdio --env API_KEY=secret python server.py
+  $ codemode-bridge config add npx-server --type stdio -- npx -y @modelcontextprotocol/server-everything
+`)
   .action((name, commandAndArgs, options) => {
     let command: string | undefined;
     let args: string[] | undefined;
@@ -144,7 +157,7 @@ config
   });
 
 config
-  .command("remove <name>")
+  .command("remove <server-name>")
   .description("Remove a server configuration")
   .option(
     "-c, --config <path>",
@@ -155,7 +168,7 @@ config
   });
 
 config
-  .command("edit <name> [commandAndArgs...]")
+  .command("edit <server-name> [commandAndArgs...]")
   .description("Edit a server configuration")
   .option(
     "-t, --type <type>",
@@ -173,6 +186,12 @@ config
     "-c, --config <path>",
     "Path to mcp.json configuration file"
   )
+  .addHelpText("after", `
+Examples:
+  $ codemode-bridge config edit my-server node /new/path/to/server.js
+  $ codemode-bridge config edit remote-server --url https://new-api.example.com/mcp
+  $ codemode-bridge config edit secure-server --env API_KEY=new-secret
+`)
   .action((name, commandAndArgs, options) => {
     let command: string | undefined;
     let args: string[] | undefined;
@@ -255,13 +274,5 @@ auth
     authLogoutCommand(serverName, options.config);
   });
 
-// Default command: run if no command specified
-program.action(async () => {
-  // If no command is specified, run the bridge
-  const args = process.argv.slice(2);
-  if (args.length === 0) {
-    await runServer(undefined, undefined, false);
-  }
-});
-
 program.parse();
+
