@@ -5,7 +5,7 @@
 
 import { execFileSync } from "node:child_process";
 import type { Executor } from "@cloudflare/codemode";
-import { logInfo } from "../utils/logger.js";
+import { logInfo, logDebug } from "../utils/logger.js";
 
 // ── Executor type ───────────────────────────────────────────────────
 
@@ -42,18 +42,26 @@ let _isolatedVmAvailable: boolean | null = null;
 
 async function isIsolatedVmAvailable(): Promise<boolean> {
   if (_isolatedVmAvailable !== null) return _isolatedVmAvailable;
+  logDebug('Checking isolated-vm availability...', { component: 'Executor' });
+  
   try {
-    // @ts-ignore - isolated-vm is an optional dependency
-    const ivm = await import('isolated-vm');
+    // We run the check in a separate process because isolated-vm can cause 
+    // segmentation faults if native dependencies or environment are incompatible.
+    // Running it here ensures a crash doesn't take down the main bridge process.
+    const checkScript = `
+      import ivm from 'isolated-vm';
+      const isolate = new ivm.Isolate({ memoryLimit: 8 });
+      isolate.dispose();
+      process.exit(0);
+    `;
     
-    // Thorough check: try to create a small isolate to ensure 
-    // the native module is actually functional and not just present but broken.
-    const isolate = new ivm.default.Isolate({ memoryLimit: 8 });
-    isolate.dispose();
+    const { execSync } = await import('node:child_process');
+    execSync(`node -e "${checkScript.replace(/"/g, '\\"').replace(/\n/g, '')}"`, { stdio: 'ignore', timeout: 5000 });
     
+    logDebug('isolated-vm is available and functional (verified via subprocess)', { component: 'Executor' });
     _isolatedVmAvailable = true;
   } catch (err) {
-    // Silently fail, just means this executor isn't an option
+    logDebug(`isolated-vm check failed or crashed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
     _isolatedVmAvailable = false;
   }
   return _isolatedVmAvailable;
@@ -64,20 +72,25 @@ let _containerRuntimeAvailable: boolean | null = null;
 async function isContainerRuntimeAvailable(): Promise<boolean> {
   if (_containerRuntimeAvailable !== null) return _containerRuntimeAvailable;
   
+  logDebug('Checking container runtime availability...', { component: 'Executor' });
   // Check for docker or podman
   for (const cmd of ['docker', 'podman']) {
     try {
+      logDebug(`Testing container runtime: ${cmd}`, { component: 'Executor' });
       // Use 'ps' instead of '--version' because 'ps' requires the 
       // runtime daemon/service to be actually running and responsive.
       // execFileSync is okay here as it's a one-time check during startup/first-use.
       execFileSync(cmd, ['ps'], { stdio: 'ignore', timeout: 3000 });
+      logDebug(`Container runtime "${cmd}" is available and responsive`, { component: 'Executor' });
       _containerRuntimeAvailable = true;
       return true;
-    } catch {
+    } catch (err) {
+      logDebug(`Container runtime "${cmd}" check failed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
       // not available or not running
     }
   }
   
+  logDebug('No responsive container runtime found', { component: 'Executor' });
   _containerRuntimeAvailable = false;
   return false;
 }
