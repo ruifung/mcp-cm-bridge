@@ -125,6 +125,12 @@ export class ContainerExecutor implements Executor {
     this.memoryLimit = options.memoryLimit ?? '256m';
     this.cpuLimit = options.cpuLimit ?? 1.0;
     this.runtime = detectRuntime(options.runtime);
+
+    // Start initialization immediately to create the container before the first execution.
+    // Errors are caught and logged, but will also be thrown when execute() awaits this.init().
+    this.init().catch(err => {
+      process.stderr.write(`[container-executor] Immediate initialization failed: ${err.message}\n`);
+    });
   }
 
   /**

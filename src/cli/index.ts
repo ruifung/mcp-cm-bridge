@@ -64,9 +64,13 @@ program
     "-d, --debug",
     "Enable debug logging"
   )
+  .option(
+    "-e, --executor <type>",
+    "Executor type (isolated-vm, container, vm2)"
+  )
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
-    await runServer(options.config, servers, options.debug);
+    await runServer(options.config, servers, options.debug, options.executor);
   });
 
 // Config command group

@@ -114,14 +114,15 @@ const executorRegistry: ExecutorEntry[] = [
  * Factory function to create an Executor instance.
  *
  * Selection logic:
+ *   - If explicitType is provided, that executor is used (throws if unavailable).
  *   - If EXECUTOR_TYPE is set, that executor is used (throws if unavailable).
  *   - Otherwise, executors are tried in preference order (isolated-vm →
  *     container → vm2) and the first available one is selected.
  *
  * Returns both the executor and metadata about the selection.
  */
-export async function createExecutor(timeout = 30000): Promise<{ executor: Executor; info: ExecutorInfo }> {
-  const requested = process.env.EXECUTOR_TYPE?.toLowerCase() as ExecutorType | undefined;
+export async function createExecutor(timeout = 30000, explicitType?: ExecutorType): Promise<{ executor: Executor; info: ExecutorInfo }> {
+  const requested = (explicitType || process.env.EXECUTOR_TYPE?.toLowerCase()) as ExecutorType | undefined;
 
   // Explicit selection — must succeed or throw
   if (requested) {
@@ -129,16 +130,16 @@ export async function createExecutor(timeout = 30000): Promise<{ executor: Execu
     if (!entry) {
       const known = executorRegistry.map(e => e.type).join(', ');
       throw new Error(
-        `Unknown EXECUTOR_TYPE="${requested}". Valid types: ${known}`
+        `Unknown executor type "${requested}". Valid types: ${known}`
       );
     }
     const available = await entry.isAvailable();
     if (!available) {
       throw new Error(
-        `EXECUTOR_TYPE=${requested} but it is not available in this environment.`
+        `Executor type ${requested} requested but it is not available in this environment.`
       );
     }
-    logInfo(`Using ${entry.type} executor (EXECUTOR_TYPE=${requested})`, { component: 'Executor' });
+    logInfo(`Using ${entry.type} executor (${explicitType ? 'explicit option' : `EXECUTOR_TYPE=${requested}`})`, { component: 'Executor' });
     return {
       executor: await entry.create(timeout),
       info: { type: entry.type, reason: 'explicit', timeout },

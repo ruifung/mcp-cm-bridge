@@ -19,7 +19,7 @@ import {
   getDefaultConfigDir,
   getConfigFilePath,
 } from "./config-manager.js";
-import { startCodeModeBridgeServer, type MCPServerConfig } from "../mcp/server.js";
+import { startCodeModeBridgeServer, type MCPServerConfig, type ExecutorType } from "../mcp/server.js";
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
@@ -32,7 +32,8 @@ import { MCPClient, type OAuth2Config } from "../mcp/mcp-client.js";
 export async function runServer(
   configPath?: string,
   servers?: string[],
-  debug?: boolean
+  debug?: boolean,
+  executor?: string
 ): Promise<void> {
   try {
     // Initialize logger with debug mode if requested
@@ -92,7 +93,7 @@ export async function runServer(
     );
 
     // Start the MCP bridge server
-    await startCodeModeBridgeServer(serverConfigs);
+    await startCodeModeBridgeServer(serverConfigs, executor as ExecutorType);
 
     // Flush buffered stderr output from stdio tools now that Bridge is fully running
     flushStderrBuffer();

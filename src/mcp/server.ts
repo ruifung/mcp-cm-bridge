@@ -19,13 +19,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { z } from "zod";
-import { createExecutor, type ExecutorInfo } from "./executor.js";
+import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
 
-// Re-export MCPServerConfig for backwards compatibility
-export type { MCPServerConfig }
+// Re-export MCPServerConfig and ExecutorType for backwards compatibility
+export type { MCPServerConfig, ExecutorType }
 
 /**
  * Convert JSON Schema to Zod schema
@@ -254,7 +254,8 @@ function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolNam
 }
 
 export async function startCodeModeBridgeServer(
-  serverConfigs: MCPServerConfig[]
+  serverConfigs: MCPServerConfig[],
+  executorType?: ExecutorType
 ) {
   // Enable buffering of stderr output from stdio tools during startup
   enableStderrBuffering();
@@ -337,7 +338,7 @@ export async function startCodeModeBridgeServer(
   }
 
   // Create the executor using the codemode SDK pattern
-  const { executor, info: executorInfo } = await createExecutor(30000); // 30 second timeout
+  const { executor, info: executorInfo } = await createExecutor(30000, executorType); // 30 second timeout
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
