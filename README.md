@@ -19,10 +19,15 @@ An MCP (Model Context Protocol) server that connects to upstream MCP servers and
 
 ### Installation
 
+Install directly from GitHub:
+
 ```bash
-npm install -g codemode-bridge
-# or use directly with npx
-npx codemode-bridge --help
+# Run without installing
+npx git+https://github.com/ruifung/mcp-cm-bridge.git run
+
+# Or install globally
+npm install -g git+https://github.com/ruifung/mcp-cm-bridge.git
+codemode-bridge run
 ```
 
 ### Basic Usage
