@@ -5,6 +5,7 @@
 
 import { VM } from "vm2";
 import type { Executor, ExecuteResult } from "@cloudflare/codemode";
+import { logInfo, logWarn } from "../utils/logger.js";
 
 /**
  * VM2-based Executor implementation
@@ -183,6 +184,7 @@ export async function createExecutor(timeout = 30000): Promise<Executor> {
   const requested = process.env.EXECUTOR_TYPE?.toLowerCase();
 
   if (requested === 'vm2') {
+    logInfo('Using vm2 executor (EXECUTOR_TYPE=vm2)', { component: 'Executor' });
     return new VM2Executor(timeout);
   }
 
@@ -194,6 +196,7 @@ export async function createExecutor(timeout = 30000): Promise<Executor> {
         'Install it with: npm install isolated-vm'
       );
     }
+    logInfo('Using isolated-vm executor (EXECUTOR_TYPE=isolated-vm)', { component: 'Executor' });
     const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
     return createIsolatedVmExecutor({ timeout });
   }
@@ -201,9 +204,11 @@ export async function createExecutor(timeout = 30000): Promise<Executor> {
   // Default: prefer isolated-vm, fall back to vm2
   const available = await isIsolatedVmAvailable();
   if (available) {
+    logInfo('Using isolated-vm executor (auto-detected)', { component: 'Executor' });
     const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
     return createIsolatedVmExecutor({ timeout });
   }
 
+  logWarn('isolated-vm not available, falling back to vm2 executor', { component: 'Executor' });
   return new VM2Executor(timeout);
 }
