@@ -1,5 +1,5 @@
 import { describe } from 'vitest';
-import { createExecutorTestSuite } from './executor.test.js';
+import { createExecutorTestSuite } from './executor-test-suite.js';
 import { createVM2Executor } from './vm2-executor.js';
 import { createIsolatedVmExecutor } from './isolated-vm-executor.js';
 
