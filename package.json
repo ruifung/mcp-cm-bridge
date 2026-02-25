@@ -1,6 +1,6 @@
 {
   "name": "@ruifung/codemode-bridge",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "MCP bridge that connects to upstream MCP servers and exposes tools via a single codemode tool for orchestration",
   "main": "dist/index.js",
   "bin": {
