@@ -76,9 +76,9 @@ The shared test suite (`executor-test-suite.ts`) verifies hardening with these t
 | `should not allow eval` | `eval("1+1")` returns an error |
 | `should not allow constructor to escape` | `Function("return process")()` returns an error |
 | `should block prototype pollution` | `Object.assign(Object.prototype, { polluted: true })` has no effect; `obj.polluted` remains `undefined` |
-| `should not allow access to require` | `require("fs")` returns an error |
+| `should not allow access to require` | `require("node:fs")` returns an error |
 | `should not allow process access` | `process.env` returns an error |
-| `should not allow network access` | `fetch`, `require('http')` — all blocked |
+| `should not allow network access` | `fetch`, `require('node:http')` — all blocked |
 | `should not allow low-level socket network access` | `net.Socket`, `dgram`, `tls`, `dns` — all blocked |
 
 ### Per-executor skip list

@@ -7,8 +7,8 @@
  * to complete the authorization flow.
  */
 
-import { createServer, Server } from 'http';
-import { URL } from 'url';
+import { createServer, Server } from 'node:http';
+import { URL } from 'node:url';
 
 /**
  * Loopback HTTP server that listens for OAuth2 redirect callbacks

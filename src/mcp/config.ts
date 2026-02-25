@@ -3,8 +3,8 @@
  * Supports VS Code's mcp.json format and other config files
  */
 
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { MCPServerConfig } from "./server.js";
 
 export interface MCPJsonConfig {

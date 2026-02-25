@@ -32,8 +32,8 @@ import {
   authListCommand,
 } from "./commands.js";
 import { getConfigFilePath } from "./config-manager.js";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const pkg = JSON.parse(
   fs.readFileSync(new URL("../../package.json", import.meta.url), "utf-8")
@@ -66,7 +66,7 @@ program
   )
   .option(
     "-e, --executor <type>",
-    "Executor type (isolated-vm, container, vm2)"
+    "Executor type (isolated-vm, container, deno, vm2)"
   )
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;

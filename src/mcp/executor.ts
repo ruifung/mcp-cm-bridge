@@ -6,10 +6,11 @@
 import { execFileSync } from "node:child_process";
 import type { Executor } from "@cloudflare/codemode";
 import { logInfo, logDebug } from "../utils/logger.js";
+import { isNode, isDeno, isBun, getNodeMajorVersion } from "../utils/env.js";
 
 // ── Executor type ───────────────────────────────────────────────────
-
-export type ExecutorType = 'isolated-vm' | 'container' | 'vm2';
+ 
+export type ExecutorType = 'isolated-vm' | 'container' | 'deno' | 'vm2';
 
 /**
  * Metadata about the executor that was created.
@@ -40,8 +41,27 @@ interface ExecutorEntry {
 
 let _isolatedVmAvailable: boolean | null = null;
 
+async function isDenoAvailable(): Promise<boolean> {
+  // Only allow Deno executor if running on Deno
+  return isDeno();
+}
+
 async function isIsolatedVmAvailable(): Promise<boolean> {
   if (_isolatedVmAvailable !== null) return _isolatedVmAvailable;
+
+  // isolated-vm is a native module specifically built for Node.js.
+  // While Bun and Deno provide compatibility layers, they often fail or
+  // exhibit unstable behavior with native Node modules like isolated-vm.
+  // Additionally, isolated-vm only supports LTS (even-numbered) Node.js versions.
+  const majorVersion = getNodeMajorVersion();
+  const isEvenVersion = majorVersion > 0 && majorVersion % 2 === 0;
+
+  if (!isNode() || !isEvenVersion) {
+    logDebug('isolated-vm is only supported on LTS (even-numbered) versions of native Node.js (not Bun, Deno, or odd-numbered Node versions)', { component: 'Executor' });
+    _isolatedVmAvailable = false;
+    return false;
+  }
+
   logDebug('Checking isolated-vm availability...', { component: 'Executor' });
   
   try {
@@ -99,8 +119,17 @@ async function isContainerRuntimeAvailable(): Promise<boolean> {
 
 const executorRegistry: ExecutorEntry[] = [
   {
-    type: 'isolated-vm',
+    type: 'deno',
     preference: 0,
+    isAvailable: isDenoAvailable,
+    async create(timeout) {
+      const { createDenoExecutor } = await import('../executor/deno-executor.js');
+      return createDenoExecutor({ timeout });
+    },
+  },
+  {
+    type: 'isolated-vm',
+    preference: 1,
     isAvailable: isIsolatedVmAvailable,
     async create(timeout) {
       const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
@@ -109,7 +138,7 @@ const executorRegistry: ExecutorEntry[] = [
   },
   {
     type: 'container',
-    preference: 1,
+    preference: 2,
     isAvailable: isContainerRuntimeAvailable,
     async create(timeout) {
       const { createContainerExecutor } = await import('../executor/container-executor.js');
@@ -118,8 +147,12 @@ const executorRegistry: ExecutorEntry[] = [
   },
   {
     type: 'vm2',
-    preference: 2,
+    preference: 3,
     isAvailable: async () => {
+      // vm2 is fundamentally broken on Bun (prototype freezing issues)
+      // and Node.js built-in 'node:vm' is not safe for untrusted code.
+      if (isBun()) return false;
+      
       try {
         await import('vm2');
         return true;

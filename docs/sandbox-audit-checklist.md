@@ -115,8 +115,8 @@ capability to automated test coverage in `executor-test-suite.ts`.
 
 | Audit item | Test coverage | Status |
 |------------|---------------|--------|
-| `require("fs")` blocked | `should not allow access to require` | Covered |
-| `await import("fs")` blocked | `should block dynamic import` | Covered |
+| `require("node:fs")` blocked | `should not allow access to require` | Covered |
+| `await import("node:fs")` blocked | `should block dynamic import` | Covered |
 | `eval("...")` blocked | `should not allow eval` | Covered |
 | `Function` constructor blocked | `should not allow constructor to escape` | Covered |
 | `fetch` / `XMLHttpRequest` / `WebSocket` blocked | `should not allow network access` | Covered |

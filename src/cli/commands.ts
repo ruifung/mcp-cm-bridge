@@ -5,8 +5,8 @@
  */
 
 import chalk from "chalk";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   loadConfig,
   saveConfig,
@@ -23,6 +23,7 @@ import { startCodeModeBridgeServer, type MCPServerConfig, type ExecutorType } fr
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
+import { getRuntimeName } from "../utils/env.js";
 import { tokenPersistence } from "../mcp/token-persistence.js";
 import { MCPClient, type OAuth2Config } from "../mcp/mcp-client.js";
 
@@ -41,6 +42,8 @@ export async function runServer(
 
     console.error(chalk.cyan("\n🚀 Code Mode Bridge"));
     console.error(chalk.cyan("====================\n"));
+
+    logInfo(`Runtime: ${getRuntimeName()}`, { component: 'CLI' });
 
     // Load the bridge configuration
     const bridgeConfig = loadConfig(configPath);

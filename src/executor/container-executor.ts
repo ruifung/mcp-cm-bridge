@@ -22,14 +22,20 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { Executor, ExecuteResult } from '@cloudflare/codemode';
 import { wrapCode } from './wrap-code.js';
+import { isBun, isDeno } from '../utils/env.js';
+import { logDebug } from '../utils/logger.js';
 
 // ── Types ───────────────────────────────────────────────────────────
 
 export interface ContainerExecutorOptions {
   /** Execution timeout per call in ms (default 30000) */
   timeout?: number;
-  /** Container image (default 'node:22-slim') */
+  /** Container image (default 'node:24-slim') */
   image?: string;
+  /** Container user (default based on image) */
+  user?: string;
+  /** Container command to run the runner (default based on image) */
+  command?: string[];
   /** Container runtime command — 'docker' | 'podman' | auto-detect */
   runtime?: string;
   /** Memory limit (default '256m') */
@@ -96,6 +102,8 @@ function getScriptPaths(): { runner: string; worker: string } {
 export class ContainerExecutor implements Executor {
   private runtime: string;
   private image: string;
+  private containerUser: string;
+  private containerCommand: string[];
   private timeout: number;
   private memoryLimit: string;
   private cpuLimit: number;
@@ -121,14 +129,36 @@ export class ContainerExecutor implements Executor {
 
   constructor(options: ContainerExecutorOptions = {}) {
     this.timeout = options.timeout ?? 30000;
-    this.image = options.image ?? 'node:24-slim';
     this.memoryLimit = options.memoryLimit ?? '256m';
     this.cpuLimit = options.cpuLimit ?? 1.0;
     this.runtime = detectRuntime(options.runtime);
 
+    // Platform-specific defaults
+    if (options.image) {
+      this.image = options.image;
+      this.containerUser = options.user ?? '1000';
+      this.containerCommand = options.command ?? ['node'];
+    } else if (isBun()) {
+      this.image = 'oven/bun:debian';
+      this.containerUser = options.user ?? '1000'; // bun user is 1000
+      this.containerCommand = ['bun', 'run'];
+    } else if (isDeno()) {
+      this.image = 'denoland/deno:debian';
+      this.containerUser = options.user ?? '1000'; // deno:debian has no 'deno' user by default
+      this.containerCommand = ['deno', 'run', '-A'];
+    } else {
+      this.image = 'node:24-slim';
+      this.containerUser = options.user ?? '1000'; // node user is 1000
+      this.containerCommand = ['node'];
+    }
+
     // Start initialization immediately to create the container before the first execution.
-    // Errors are caught and logged, but will also be thrown when execute() awaits this.init().
+    if (process.env.DEBUG || process.env.NODE_ENV === 'test') {
+      console.log(`[ContainerExecutor] Using image: ${this.image}, user: ${this.containerUser}, command: ${this.containerCommand.join(' ')}`);
+    }
+    
     this.init().catch(err => {
+
       process.stderr.write(`[container-executor] Immediate initialization failed: ${err.message}\n`);
     });
   }
@@ -207,7 +237,7 @@ export class ContainerExecutor implements Executor {
       '--read-only',                   // immutable rootfs
       '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',  // writable /tmp
       '--cap-drop=ALL',               // drop all capabilities
-      '--user', 'node',               // run as non-root user
+      '--user', this.containerUser,
       '--memory', this.memoryLimit,
       `--cpus=${this.cpuLimit}`,
       '--pids-limit=64',              // limit process spawning
@@ -215,7 +245,7 @@ export class ContainerExecutor implements Executor {
       '-v', `${scripts.worker}:/app/container-worker.mjs:ro`,  // mount worker script
       '-w', '/app',
       this.image,
-      'node', '/app/container-runner.mjs',
+      ...this.containerCommand, '/app/container-runner.mjs',
     ];
 
     this.process = spawn(this.runtime, args, {

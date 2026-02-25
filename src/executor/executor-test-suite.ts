@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { Executor, ExecuteResult } from '@cloudflare/codemode';
+import { getRuntimeName } from '../utils/env.js';
 
 /**
  * Universal executor test suite
@@ -39,6 +40,7 @@ export function createExecutorTestSuite(
   };
 
   describe(`Executor: ${name}`, () => {
+    console.log(`[Test] Runtime: ${getRuntimeName()}`);
     let executor: Executor;
 
     beforeAll(async () => {
@@ -484,7 +486,7 @@ export function createExecutorTestSuite(
     describe('Isolation & Safety', () => {
       testOrSkip('should not allow access to require', async () => {
         const result = await executor.execute(
-          'return require("fs");',
+          'return require("node:fs");',
           {}
         );
         expect(result.error).toBeDefined();
@@ -526,7 +528,7 @@ export function createExecutorTestSuite(
             return 'network allowed via fetch';
           }
           if (typeof require === 'function') {
-            const http = require('http');
+            const http = require('node:http');
             await new Promise((resolve, reject) => {
               http.get('http://example.com', resolve).on('error', reject);
             });
@@ -557,7 +559,7 @@ export function createExecutorTestSuite(
           if (typeof require === 'function') {
             // Try net.Socket (TCP)
             try {
-              const net = require('net');
+              const net = require('node:net');
               await new Promise((resolve, reject) => {
                 const sock = new net.Socket();
                 sock.setTimeout(2000);
@@ -570,7 +572,7 @@ export function createExecutorTestSuite(
 
             // Try dgram (UDP)
             try {
-              const dgram = require('dgram');
+              const dgram = require('node:dgram');
               const sock = dgram.createSocket('udp4');
               await new Promise((resolve, reject) => {
                 sock.on('error', reject);
@@ -584,7 +586,7 @@ export function createExecutorTestSuite(
 
             // Try tls.connect
             try {
-              const tls = require('tls');
+              const tls = require('node:tls');
               await new Promise((resolve, reject) => {
                 const sock = tls.connect(443, '1.1.1.1', {}, resolve);
                 sock.on('error', reject);
@@ -594,7 +596,7 @@ export function createExecutorTestSuite(
 
             // Try dns.resolve
             try {
-              const dns = require('dns');
+              const dns = require('node:dns');
               await new Promise((resolve, reject) => {
                 dns.resolve('example.com', (err, addresses) => {
                   err ? reject(err) : resolve(addresses);
@@ -724,7 +726,7 @@ export function createExecutorTestSuite(
         const result = await executor.execute(
           `
           try {
-            const m = await import('fs');
+            const m = await import('node:fs');
             return 'import allowed';
           } catch (e) {
             return 'blocked';

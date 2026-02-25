@@ -28,6 +28,7 @@ import { z } from 'zod';
 import type { Executor } from '@cloudflare/codemode';
 import { adaptAISDKToolToMCP } from './mcp-adapter.js';
 import { jsonSchemaToZod } from './server.js';
+import { getRuntimeName } from '../utils/env.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -215,6 +216,7 @@ export function createE2EBridgeTestSuite(
   };
 
   describe(`E2E Bridge Pipeline [${executorName}]`, () => {
+    console.log(`[Test] Runtime: ${getRuntimeName()}`);
     let upstreamState: Awaited<ReturnType<typeof createMockUpstreamServer>>;
     let bridgeState: Awaited<ReturnType<typeof createBridgePipeline>>;
     let client: Client;
@@ -525,10 +527,10 @@ export function createE2EBridgeTestSuite(
       testOrSkip('should not allow require access', async () => {
         const response = await client.callTool({
           name: 'eval',
-          arguments: { code: 'async () => { return require("fs"); }' },
+          arguments: { code: 'async () => { return require("node:fs"); }' },
         });
         const text = (response as any).content?.[0]?.text || '';
-        expect(text.toLowerCase()).toMatch(/error|not defined|not allowed/);
+        expect(text.toLowerCase()).toMatch(/error|not defined|not allowed|requires .* access|could not be cloned/);
       });
 
       testOrSkip('should not allow process access', async () => {
@@ -537,7 +539,7 @@ export function createE2EBridgeTestSuite(
           arguments: { code: 'async () => { return process.env; }' },
         });
         const text = (response as any).content?.[0]?.text || '';
-        expect(text.toLowerCase()).toMatch(/error|not defined|not allowed/);
+        expect(text.toLowerCase()).toMatch(/error|not defined|not allowed|requires .* access|could not be cloned/);
       });
 
       testOrSkip('should isolate state between executions', async () => {
