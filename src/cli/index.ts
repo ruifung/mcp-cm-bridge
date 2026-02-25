@@ -32,6 +32,7 @@ import {
   authListCommand,
 } from "./commands.js";
 import { getConfigFilePath } from "./config-manager.js";
+import { getExecutorStatus } from "../mcp/executor-status.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -43,10 +44,23 @@ const defaultConfigPath = getConfigFilePath();
 
 const program = new Command();
 
+// Add logic to get available executors for version output
+let versionString = pkg.version;
+if (process.argv.includes("-V") || process.argv.includes("--version")) {
+  const statuses = await getExecutorStatus();
+  const available = statuses
+    .filter((s) => s.isAvailable)
+    .map((s) => s.type)
+    .join(", ");
+  if (available) {
+    versionString = `${pkg.version} (executors: ${available})`;
+  }
+}
+
 program
   .name("codemode-bridge")
   .description("Code Mode Bridge CLI - Connects to multiple MCP servers and exposes them as a single tool")
-  .version(pkg.version);
+  .version(versionString);
 
 // Main 'run' command
 program

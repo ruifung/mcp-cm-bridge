@@ -129,7 +129,7 @@ export class ContainerExecutor implements Executor {
 
   constructor(options: ContainerExecutorOptions = {}) {
     this.timeout = options.timeout ?? 30000;
-    this.memoryLimit = options.memoryLimit ?? '256m';
+    this.memoryLimit = options.memoryLimit ?? '512M';
     this.cpuLimit = options.cpuLimit ?? 1.0;
     this.runtime = detectRuntime(options.runtime);
 
@@ -240,7 +240,7 @@ export class ContainerExecutor implements Executor {
       '--user', this.containerUser,
       '--memory', this.memoryLimit,
       `--cpus=${this.cpuLimit}`,
-      '--pids-limit=64',              // limit process spawning
+      '--pids-limit=128',              // limit process spawning
       '-v', `${scripts.runner}:/app/container-runner.mjs:ro`,  // mount runner script
       '-v', `${scripts.worker}:/app/container-worker.mjs:ro`,  // mount worker script
       '-w', '/app',

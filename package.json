@@ -14,8 +14,11 @@
     "build": "tsc",
     "prepare": "npm run build",
     "dev": "tsx src/cli/index.ts",
+    "dev:bun": "bun run src/cli/index.ts",
+    "dev:deno": "deno run --allow-net --allow-read src/cli/index.ts",
     "test": "vitest",
-    "test:e2e": "vitest run src/mcp/e2e-bridge-runner.test.ts --reporter=verbose"
+    "test:bun": "bun test",
+    "test:deno": "deno run -A npm:vitest"
   },
   "keywords": [
     "mcp",

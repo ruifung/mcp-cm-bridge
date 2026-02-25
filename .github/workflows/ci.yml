@@ -43,25 +43,14 @@ jobs:
 
       - name: Install dependencies (Deno)
         if: matrix.runtime == 'deno'
-        run: npm install # Need vitest locally for deno task test:e2e
+        run: npm install # Need vitest locally for Deno tests
 
-      - name: Run Unit Tests (Node/Deno)
-        if: matrix.runtime != 'bun'
+      - name: Run Tests
         run: |
           if [ "${{ matrix.runtime }}" = "node" ]; then
             npm test run
-          else
+          elif [ "${{ matrix.runtime }}" = "deno" ]; then
             deno run -A npm:vitest run
+          elif [ "${{ matrix.runtime }}" = "bun" ]; then
+            bun test
           fi
-
-      - name: Run E2E Tests (Node)
-        if: matrix.runtime == 'node'
-        run: npm run test:e2e
-
-      - name: Run E2E Tests (Bun)
-        if: matrix.runtime == 'bun'
-        run: bun test src/mcp/e2e-bridge-runner.test.ts
-
-      - name: Run E2E Tests (Deno)
-        if: matrix.runtime == 'deno'
-        run: deno task test:e2e
