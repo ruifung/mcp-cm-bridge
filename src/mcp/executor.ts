@@ -44,9 +44,16 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
   if (_isolatedVmAvailable !== null) return _isolatedVmAvailable;
   try {
     // @ts-ignore - isolated-vm is an optional dependency
-    await import('isolated-vm');
+    const ivm = await import('isolated-vm');
+    
+    // Thorough check: try to create a small isolate to ensure 
+    // the native module is actually functional and not just present but broken.
+    const isolate = new ivm.default.Isolate({ memoryLimit: 8 });
+    isolate.dispose();
+    
     _isolatedVmAvailable = true;
-  } catch {
+  } catch (err) {
+    // Silently fail, just means this executor isn't an option
     _isolatedVmAvailable = false;
   }
   return _isolatedVmAvailable;
@@ -54,17 +61,23 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
 
 let _containerRuntimeAvailable: boolean | null = null;
 
-function isContainerRuntimeAvailable(): boolean {
+async function isContainerRuntimeAvailable(): Promise<boolean> {
   if (_containerRuntimeAvailable !== null) return _containerRuntimeAvailable;
+  
+  // Check for docker or podman
   for (const cmd of ['docker', 'podman']) {
     try {
-      execFileSync(cmd, ['--version'], { stdio: 'ignore', timeout: 5000 });
+      // Use 'ps' instead of '--version' because 'ps' requires the 
+      // runtime daemon/service to be actually running and responsive.
+      // execFileSync is okay here as it's a one-time check during startup/first-use.
+      execFileSync(cmd, ['ps'], { stdio: 'ignore', timeout: 3000 });
       _containerRuntimeAvailable = true;
       return true;
     } catch {
-      // not available
+      // not available or not running
     }
   }
+  
   _containerRuntimeAvailable = false;
   return false;
 }
@@ -84,7 +97,7 @@ const executorRegistry: ExecutorEntry[] = [
   {
     type: 'container',
     preference: 1,
-    isAvailable: async () => isContainerRuntimeAvailable(),
+    isAvailable: isContainerRuntimeAvailable,
     async create(timeout) {
       const { createContainerExecutor } = await import('../executor/container-executor.js');
       return createContainerExecutor({ timeout });
