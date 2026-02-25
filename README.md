@@ -23,11 +23,17 @@ Install directly from GitHub:
 
 ```bash
 # Run without installing
-npx git+https://github.com/ruifung/mcp-cm-bridge.git run
+npx @ruifung/codemode-bridge
 
 # Or install globally
-npm install -g git+https://github.com/ruifung/mcp-cm-bridge.git
+npm install -g @ruifung/codemode-bridge
 codemode-bridge run
+```
+
+Alternatively, install from the git URL:
+
+```bash
+npx git+https://github.com/ruifung/mcp-cm-bridge.git
 ```
 
 #### Windows Users
@@ -337,7 +343,7 @@ Add to your `.vscode/mcp.json` (workspace) or user `settings.json`:
   "servers": {
     "codemode-bridge": {
       "command": "npx",
-      "args": ["-y", "git+https://github.com/ruifung/mcp-cm-bridge.git"]
+      "args": ["-y", "@ruifung/codemode-bridge"]
     }
   }
 }
@@ -350,7 +356,7 @@ To load only specific upstream servers:
   "servers": {
     "codemode-bridge": {
       "command": "npx",
-      "args": ["-y", "git+https://github.com/ruifung/mcp-cm-bridge.git", "--servers", "kubernetes,time"]
+      "args": ["-y", "@ruifung/codemode-bridge", "--servers", "kubernetes,time"]
     }
   }
 }
@@ -363,7 +369,7 @@ To force a specific executor:
   "servers": {
     "codemode-bridge": {
       "command": "npx",
-      "args": ["-y", "git+https://github.com/ruifung/mcp-cm-bridge.git"],
+      "args": ["-y", "@ruifung/codemode-bridge"],
       "env": {
         "EXECUTOR_TYPE": "container"
       }
@@ -381,7 +387,7 @@ Add to `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/
   "mcpServers": {
     "codemode-bridge": {
       "command": "npx",
-      "args": ["-y", "git+https://github.com/ruifung/mcp-cm-bridge.git"]
+      "args": ["-y", "@ruifung/codemode-bridge"]
     }
   }
 }
@@ -397,7 +403,7 @@ Add to `~/.config/opencode/opencode.json` (or project-level `opencode.json`):
     "codemode-bridge": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "git+https://github.com/ruifung/mcp-cm-bridge.git"]
+      "args": ["-y", "@ruifung/codemode-bridge"]
     }
   }
 }
@@ -405,7 +411,7 @@ Add to `~/.config/opencode/opencode.json` (or project-level `opencode.json`):
 
 ### If installed globally
 
-If you've installed the package globally (`npm install -g git+https://github.com/ruifung/mcp-cm-bridge.git`), replace the `npx` command with the direct binary:
+If you've installed the package globally (`npm install -g @ruifung/codemode-bridge`), replace the `npx` command with the direct binary:
 
 ```json
 {

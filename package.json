@@ -32,9 +32,6 @@
     "url": "https://github.com/ruifung/mcp-cm-bridge.git"
   },
   "type": "module",
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  },
   "dependencies": {
     "@cloudflare/codemode": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.0",
