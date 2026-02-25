@@ -48,10 +48,8 @@ jobs:
         id: pkg
         run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm (with provenance)
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm
+        run: npm publish --access public
 
       - name: Publish to GitHub Packages
         run: |
