@@ -80,16 +80,16 @@ createExecutorTestSuite('container', () => createContainerExecutor(), {
 });
 
 // Check Deno availability
-let isDenoAvailable = false;
+let isDenoAvailableResult = false;
 try {
   execSync('deno --version', { stdio: 'ignore' });
-  isDenoAvailable = true;
+  isDenoAvailableResult = true;
 } catch {
   // Deno not found in PATH
 }
 
 // Run test suite against Deno executor if available
-if (isDenoAvailable) {
+if (isDenoAvailableResult) {
   createExecutorTestSuite('deno', () => createDenoExecutor(), {
     skipTests: [
       // JSON serialization boundary: undefined becomes null over the wire

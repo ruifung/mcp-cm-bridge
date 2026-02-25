@@ -3,10 +3,10 @@
  * Selects the best available executor (isolated-vm → container → vm2)
  */
 
-import { execFileSync } from "node:child_process";
 import type { Executor } from "@cloudflare/codemode";
 import { logInfo, logDebug } from "../utils/logger.js";
 import { isNode, isDeno, isBun, getNodeMajorVersion } from "../utils/env.js";
+import { resolveDockerSocketPath } from '../utils/docker.js';
 
 // ── Executor type ───────────────────────────────────────────────────
  
@@ -87,31 +87,46 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
   return _isolatedVmAvailable;
 }
 
-let _containerRuntimeAvailable: boolean | null = null;
+let _containerAvailable: boolean | null = null;
 
-async function isContainerRuntimeAvailable(): Promise<boolean> {
-  if (_containerRuntimeAvailable !== null) return _containerRuntimeAvailable;
+async function isContainerAvailable(): Promise<boolean> {
+  if (_containerAvailable !== null) return _containerAvailable;
+
+  logDebug('Checking container executor availability...', { component: 'Executor' });
   
-  logDebug('Checking container runtime availability...', { component: 'Executor' });
-  // Check for docker or podman
-  for (const cmd of ['docker', 'podman']) {
-    try {
-      logDebug(`Testing container runtime: ${cmd}`, { component: 'Executor' });
-      // Use 'ps' instead of '--version' because 'ps' requires the 
-      // runtime daemon/service to be actually running and responsive.
-      // execFileSync is okay here as it's a one-time check during startup/first-use.
-      execFileSync(cmd, ['ps'], { stdio: 'ignore', timeout: 3000 });
-      logDebug(`Container runtime "${cmd}" is available and responsive`, { component: 'Executor' });
-      _containerRuntimeAvailable = true;
-      return true;
-    } catch (err) {
-      logDebug(`Container runtime "${cmd}" check failed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
-      // not available or not running
-    }
+  // 1. Check socket availability (Dockerode)
+  try {
+    const Docker = (await import('dockerode')).default;
+    const socketPath = resolveDockerSocketPath();
+    logDebug(`Attempting to connect to Docker/Podman socket: ${socketPath || 'default'}`, { component: 'Executor' });
+    const docker = new Docker(socketPath ? { socketPath } : {});
+    await docker.ping();
+    logDebug('Container executor (Docker/Podman socket) is responsive', { component: 'Executor' });
+    _containerAvailable = true;
+    return true;
+  } catch (err) {
+    logDebug(`Container executor socket check failed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
   }
-  
-  logDebug('No responsive container runtime found', { component: 'Executor' });
-  _containerRuntimeAvailable = false;
+
+  // 2. Fallback to CLI availability check
+  try {
+    const { execFileSync } = await import('node:child_process');
+    for (const cmd of ['docker', 'podman']) {
+      try {
+        execFileSync(cmd, ['ps'], { stdio: 'ignore', timeout: 3000 });
+        logDebug(`Container runtime "${cmd}" CLI is available and responsive`, { component: 'Executor' });
+        _containerAvailable = true;
+        return true;
+      } catch {
+        // next cmd
+      }
+    }
+  } catch (err) {
+    logDebug(`Container CLI check failed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
+  }
+
+  logDebug('No responsive container runtime (socket or CLI) found', { component: 'Executor' });
+  _containerAvailable = false;
   return false;
 }
 
@@ -139,7 +154,7 @@ const executorRegistry: ExecutorEntry[] = [
   {
     type: 'container',
     preference: 2,
-    isAvailable: isContainerRuntimeAvailable,
+    isAvailable: isContainerAvailable,
     async create(timeout) {
       const { createContainerExecutor } = await import('../executor/container-executor.js');
       return createContainerExecutor({ timeout });

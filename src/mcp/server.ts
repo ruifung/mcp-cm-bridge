@@ -339,6 +339,7 @@ export async function startCodeModeBridgeServer(
 
   // Create the executor using the codemode SDK pattern
   const { executor, info: executorInfo } = await createExecutor(30000, executorType); // 30 second timeout
+  await executor.execute('async () => { return "startup test" }', {})
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
