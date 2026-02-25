@@ -385,6 +385,10 @@ If you've installed the package globally (`npm install -g @ruifung/codemode-brid
 }
 ```
 
+## Acknowledgements
+
+This project is built on [`@cloudflare/codemode`](https://www.npmjs.com/package/@cloudflare/codemode), Cloudflare's Code Mode SDK. The SDK provides the core tool-wrapping and type-generation engine that enables agents to call multiple MCP tools through a single `eval` interface. This project adapts that capability to run locally outside of Cloudflare Workers, using sandboxed executors (isolated-vm, Docker/Podman containers, or vm2) instead.
+
 ## AI Generated Code Disclosure
 
 This project is largely AI-generated. It serves as an experiment to get Cloudflare's Code Mode SDK working locally without paying for Workers, by bridging upstream MCP servers through a sandboxed executor.
