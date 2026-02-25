@@ -1,253 +1,163 @@
 /**
- * Executor Implementation for Codemode SDK
- * Implements the @cloudflare/codemode Executor interface using vm2 sandbox
+ * Executor factory and registry for Codemode SDK
+ * Selects the best available executor (isolated-vm → container → vm2)
  */
 
-import { VM } from "vm2";
 import { execFileSync } from "node:child_process";
-import type { Executor, ExecuteResult } from "@cloudflare/codemode";
-import { logInfo, logWarn } from "../utils/logger.js";
-import { wrapCode } from "../executor/wrap-code.js";
+import type { Executor } from "@cloudflare/codemode";
+import { logInfo } from "../utils/logger.js";
 
-/**
- * VM2-based Executor implementation
- * Runs LLM-generated code in an isolated sandbox with access to tools via codemode.* namespace
- */
-export class VM2Executor implements Executor {
-  private timeout: number;
+// ── Executor type ───────────────────────────────────────────────────
 
-  constructor(timeout = 30000) {
-    this.timeout = timeout;
-  }
-
-  async execute(
-    code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult> {
-    const logs: string[] = [];
-    const capturedConsole = {
-      log: (...args: unknown[]) => {
-        logs.push(
-          args.map((arg) => this.stringify(arg)).join(" ")
-        );
-      },
-      warn: (...args: unknown[]) => {
-        logs.push(
-          "[WARN] " + args.map((arg) => this.stringify(arg)).join(" ")
-        );
-      },
-      error: (...args: unknown[]) => {
-        logs.push(
-          "[ERROR] " + args.map((arg) => this.stringify(arg)).join(" ")
-        );
-      },
-    };
-
-    try {
-      // Create a proxy object that intercepts codemode.* calls
-      // and routes them to the provided functions
-      const codemodeProxy = new Proxy(
-        {},
-        {
-          get: (_target, prop: string | symbol) => {
-            const fnName = String(prop);
-            if (fnName in fns) {
-              return fns[fnName];
-            }
-            throw new Error(
-              `Tool '${fnName}' not found. Available tools: ${Object.keys(fns).join(", ")}`
-            );
-          },
-        }
-      );
-
-      // Prepare the code to run - wrap in async IIFE if not already wrapped
-      const wrappedCode = wrapCode(code);
-
-      // Create VM with sandbox containing console and codemode
-      const vm = new VM({
-        timeout: this.timeout,
-        sandbox: {
-          console: capturedConsole,
-          codemode: codemodeProxy,
-        },
-      });
-
-      // Execute the code and capture result
-      const result = vm.run(wrappedCode);
-
-      // If result is a promise, await it with timeout
-      if (result && typeof result === "object" && "then" in result) {
-        let timeoutHandle: NodeJS.Timeout;
-        const awaitedResult = await Promise.race([
-          result.finally(() => clearTimeout(timeoutHandle)),
-          new Promise((_, reject) => {
-            timeoutHandle = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Code execution timeout after ${this.timeout}ms`
-                  )
-                ),
-              this.timeout
-            );
-          }),
-        ]);
-        return {
-          result: awaitedResult,
-          logs: logs.length > 0 ? logs : undefined,
-        };
-      }
-
-      return {
-        result,
-        logs: logs.length > 0 ? logs : undefined,
-      };
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      return {
-        result: null,
-        error: errorMessage,
-        logs: logs.length > 0 ? logs : undefined,
-      };
-    }
-  }
-
-  /**
-   * Safely stringify values for logging
-   */
-  private stringify(value: unknown): string {
-    if (value === null) return "null";
-    if (value === undefined) return "undefined";
-    if (typeof value === "string") return value;
-    if (typeof value === "number" || typeof value === "boolean")
-      return String(value);
-
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return Object.prototype.toString.call(value);
-    }
-  }
-}
-
-/**
- * Check if isolated-vm is available (optional dependency)
- */
-let isolatedVmAvailable: boolean | null = null;
-
-async function isIsolatedVmAvailable(): Promise<boolean> {
-  if (isolatedVmAvailable !== null) return isolatedVmAvailable;
-  try {
-    // @ts-ignore - isolated-vm is an optional dependency
-    await import('isolated-vm');
-    isolatedVmAvailable = true;
-  } catch {
-    isolatedVmAvailable = false;
-  }
-  return isolatedVmAvailable;
-}
+export type ExecutorType = 'isolated-vm' | 'container' | 'vm2';
 
 /**
  * Metadata about the executor that was created.
  */
 export interface ExecutorInfo {
-  /** The executor type: 'vm2', 'isolated-vm', or 'container' */
-  type: 'vm2' | 'isolated-vm' | 'container';
+  /** The executor type that was selected */
+  type: ExecutorType;
   /** How the executor was selected */
-  reason: 'explicit' | 'auto-detected' | 'fallback';
+  reason: 'explicit' | 'auto-detected';
   /** Execution timeout in ms */
   timeout: number;
 }
 
-/**
- * Check if a container runtime (Docker/Podman) is available.
- */
-let containerRuntimeAvailable: boolean | null = null;
+// ── Registry entry ──────────────────────────────────────────────────
+
+interface ExecutorEntry {
+  /** Executor type name */
+  type: ExecutorType;
+  /** Lower = preferred. Entries are tried in ascending order. */
+  preference: number;
+  /** Returns true if this executor can be used in the current environment. */
+  isAvailable: () => Promise<boolean>;
+  /** Creates the executor instance. Only called after isAvailable() returns true. */
+  create: (timeout: number) => Promise<Executor>;
+}
+
+// ── Availability checks (cached) ────────────────────────────────────
+
+let _isolatedVmAvailable: boolean | null = null;
+
+async function isIsolatedVmAvailable(): Promise<boolean> {
+  if (_isolatedVmAvailable !== null) return _isolatedVmAvailable;
+  try {
+    // @ts-ignore - isolated-vm is an optional dependency
+    await import('isolated-vm');
+    _isolatedVmAvailable = true;
+  } catch {
+    _isolatedVmAvailable = false;
+  }
+  return _isolatedVmAvailable;
+}
+
+let _containerRuntimeAvailable: boolean | null = null;
 
 function isContainerRuntimeAvailable(): boolean {
-  if (containerRuntimeAvailable !== null) return containerRuntimeAvailable;
+  if (_containerRuntimeAvailable !== null) return _containerRuntimeAvailable;
   for (const cmd of ['docker', 'podman']) {
     try {
       execFileSync(cmd, ['--version'], { stdio: 'ignore', timeout: 5000 });
-      containerRuntimeAvailable = true;
+      _containerRuntimeAvailable = true;
       return true;
     } catch {
       // not available
     }
   }
-  containerRuntimeAvailable = false;
+  _containerRuntimeAvailable = false;
   return false;
 }
+
+// ── Executor registry (sorted by preference, lowest first) ─────────
+
+const executorRegistry: ExecutorEntry[] = [
+  {
+    type: 'isolated-vm',
+    preference: 0,
+    isAvailable: isIsolatedVmAvailable,
+    async create(timeout) {
+      const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
+      return createIsolatedVmExecutor({ timeout });
+    },
+  },
+  {
+    type: 'container',
+    preference: 1,
+    isAvailable: async () => isContainerRuntimeAvailable(),
+    async create(timeout) {
+      const { createContainerExecutor } = await import('../executor/container-executor.js');
+      return createContainerExecutor({ timeout });
+    },
+  },
+  {
+    type: 'vm2',
+    preference: 2,
+    isAvailable: async () => {
+      try {
+        await import('vm2');
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    async create(timeout) {
+      const { createVM2Executor } = await import('../executor/vm2-executor.js');
+      return createVM2Executor({ timeout });
+    },
+  },
+];
+
+// ── Factory ─────────────────────────────────────────────────────────
 
 /**
  * Factory function to create an Executor instance.
  *
  * Selection logic:
- *   1. EXECUTOR_TYPE=vm2         -> always use vm2
- *   2. EXECUTOR_TYPE=isolated-vm -> always use isolated-vm (throws if unavailable)
- *   3. EXECUTOR_TYPE=container   -> always use container executor (throws if no runtime)
- *   4. EXECUTOR_TYPE unset       -> prefer isolated-vm, fall back to vm2
+ *   - If EXECUTOR_TYPE is set, that executor is used (throws if unavailable).
+ *   - Otherwise, executors are tried in preference order (isolated-vm →
+ *     container → vm2) and the first available one is selected.
  *
  * Returns both the executor and metadata about the selection.
  */
 export async function createExecutor(timeout = 30000): Promise<{ executor: Executor; info: ExecutorInfo }> {
-  const requested = process.env.EXECUTOR_TYPE?.toLowerCase();
+  const requested = process.env.EXECUTOR_TYPE?.toLowerCase() as ExecutorType | undefined;
 
-  if (requested === 'vm2') {
-    logInfo('Using vm2 executor (EXECUTOR_TYPE=vm2)', { component: 'Executor' });
-    return {
-      executor: new VM2Executor(timeout),
-      info: { type: 'vm2', reason: 'explicit', timeout },
-    };
-  }
-
-  if (requested === 'isolated-vm') {
-    const available = await isIsolatedVmAvailable();
+  // Explicit selection — must succeed or throw
+  if (requested) {
+    const entry = executorRegistry.find(e => e.type === requested);
+    if (!entry) {
+      const known = executorRegistry.map(e => e.type).join(', ');
+      throw new Error(
+        `Unknown EXECUTOR_TYPE="${requested}". Valid types: ${known}`
+      );
+    }
+    const available = await entry.isAvailable();
     if (!available) {
       throw new Error(
-        'EXECUTOR_TYPE=isolated-vm but the "isolated-vm" package is not installed. ' +
-        'Install it with: npm install isolated-vm'
+        `EXECUTOR_TYPE=${requested} but it is not available in this environment.`
       );
     }
-    logInfo('Using isolated-vm executor (EXECUTOR_TYPE=isolated-vm)', { component: 'Executor' });
-    const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
+    logInfo(`Using ${entry.type} executor (EXECUTOR_TYPE=${requested})`, { component: 'Executor' });
     return {
-      executor: createIsolatedVmExecutor({ timeout }),
-      info: { type: 'isolated-vm', reason: 'explicit', timeout },
+      executor: await entry.create(timeout),
+      info: { type: entry.type, reason: 'explicit', timeout },
     };
   }
 
-  if (requested === 'container') {
-    if (!isContainerRuntimeAvailable()) {
-      throw new Error(
-        'EXECUTOR_TYPE=container but no container runtime found. ' +
-        'Install Docker or Podman, or set CONTAINER_RUNTIME to the path of your runtime.'
-      );
+  // Auto-detect — walk registry in preference order
+  const sorted = [...executorRegistry].sort((a, b) => a.preference - b.preference);
+  for (const entry of sorted) {
+    const available = await entry.isAvailable();
+    if (available) {
+      logInfo(`Using ${entry.type} executor (auto-detected)`, { component: 'Executor' });
+      return {
+        executor: await entry.create(timeout),
+        info: { type: entry.type, reason: 'auto-detected', timeout },
+      };
     }
-    logInfo('Using container executor (EXECUTOR_TYPE=container)', { component: 'Executor' });
-    const { createContainerExecutor } = await import('../executor/container-executor.js');
-    return {
-      executor: createContainerExecutor({ timeout }),
-      info: { type: 'container', reason: 'explicit', timeout },
-    };
   }
 
-  // Default: prefer isolated-vm, fall back to vm2
-  const available = await isIsolatedVmAvailable();
-  if (available) {
-    logInfo('Using isolated-vm executor (auto-detected)', { component: 'Executor' });
-    const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
-    return {
-      executor: createIsolatedVmExecutor({ timeout }),
-      info: { type: 'isolated-vm', reason: 'auto-detected', timeout },
-    };
-  }
-
-  logWarn('isolated-vm not available, falling back to vm2 executor', { component: 'Executor' });
-  return {
-    executor: new VM2Executor(timeout),
-    info: { type: 'vm2', reason: 'fallback', timeout },
-  };
+  // Should never happen since vm2 is always available
+  throw new Error('No executor implementation available.');
 }

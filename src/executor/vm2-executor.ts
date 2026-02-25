@@ -5,6 +5,7 @@
 
 import { VM } from "vm2";
 import type { Executor, ExecuteResult } from "@cloudflare/codemode";
+import { wrapCode } from "./wrap-code.js";
 
 /**
  * VM2-based Executor implementation
@@ -41,12 +42,8 @@ export class VM2Executor implements Executor {
     };
 
     try {
-      // Wrap code in async IIFE and await the result
-      const wrappedCode = `
-(async () => {
-${code.split('\n').map(line => '  ' + line).join('\n')}
-})()
-`;
+      // Wrap code using shared wrapCode utility (handles arrow functions, statements, etc.)
+      const wrappedCode = wrapCode(code);
 
       const vm = new VM({
         timeout: this.timeout,

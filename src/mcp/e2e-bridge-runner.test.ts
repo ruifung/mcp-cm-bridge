@@ -6,12 +6,12 @@
  */
 
 import { createE2EBridgeTestSuite } from './e2e-bridge-test-suite.js';
-import { VM2Executor } from './executor.js';
+import { createVM2Executor } from '../executor/vm2-executor.js';
 import { createIsolatedVmExecutor } from '../executor/isolated-vm-executor.js';
 import { createContainerExecutor } from '../executor/container-executor.js';
 
-// Run E2E suite against vm2 executor (bridge version from src/mcp/executor.ts)
-createE2EBridgeTestSuite('vm2', () => new VM2Executor(10000));
+// Run E2E suite against vm2 executor
+createE2EBridgeTestSuite('vm2', () => createVM2Executor({ timeout: 10000 }));
 
 // Run E2E suite against isolated-vm executor
 createE2EBridgeTestSuite('isolated-vm', () =>
