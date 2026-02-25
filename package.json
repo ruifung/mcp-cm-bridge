@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "dev:cli": "tsx src/cli/index.ts",
+    "dev": "tsx src/cli/index.ts",
     "test": "vitest",
     "test:e2e": "vitest run src/mcp/e2e-bridge-runner.test.ts"
   },

@@ -1,16 +1,19 @@
 # Code Mode Bridge
 
-An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `codemode` tool for unified orchestration and execution.
+An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution.
 
 ## Features
 
 - **Multi-server bridging**: Connect to multiple upstream MCP servers simultaneously
-- **Tool aggregation**: Exposes all upstream tools through a single `codemode` tool
-- **Dynamic discovery**: Auto-generated tool descriptions show agents exactly what's available
+- **Tool aggregation**: Exposes all upstream tools through a single `eval` tool
+- **Dynamic discovery**: Auto-generated TypeScript type definitions show agents exactly what's available
 - **Namespaced tools**: Tools are automatically namespaced by server (e.g., `kubernetes__pods_list`)
-- **Sandbox execution**: Code runs in isolated vm2 sandbox with 30-second timeout
-- **CLI management**: Easy command-line interface for server configuration
-- ~~**npx compatible**: Run directly with `npx codemode-bridge`~~
+- **Multi-executor sandbox**: Three executor backends with automatic selection
+  - **isolated-vm** (preferred) -- V8 isolate with strict JS-level sandboxing
+  - **container** -- Docker/Podman with OS-level isolation (`--network=none`, `--read-only`, `--cap-drop=ALL`)
+  - **vm2** -- Lightweight VM2 sandbox
+- **Status introspection**: Built-in `status` tool reports executor type, upstream servers, and available tools
+- **CLI management**: Command-line interface for server configuration
 
 ## Quick Start
 
@@ -76,27 +79,73 @@ Servers are stored in `~/.config/codemode-bridge/mcp.json`:
 ### Server Types
 
 - **stdio**: Execute a command that runs an MCP server via stdin/stdout
-- **http**: Connect to an HTTP-based MCP server
+- **http**: Connect to an HTTP-based MCP server (supports OAuth)
+
+## Executors
+
+The bridge supports three executor backends. On startup, it automatically selects the best available one, or you can force a specific executor via the `EXECUTOR_TYPE` environment variable.
+
+### Selection Order (auto-detect)
+
+| Priority | Executor | Selection Criteria |
+|----------|------------|---------------------------------------------|
+| 0 | `isolated-vm` | `isolated-vm` npm package is installed |
+| 1 | `container` | Docker or Podman runtime is available |
+| 2 | `vm2` | Always available (bundled dependency) |
+
+### Environment Variables
+
+| Variable | Description |
+|------|-------------|
+| `EXECUTOR_TYPE` | Force a specific executor: `isolated-vm`, `container`, or `vm2`. Throws if unavailable. |
+| `CONTAINER_RUNTIME` | Override container runtime detection (e.g., `podman`, `/usr/bin/docker`). |
+
+### Executor Comparison
+
+| Feature | isolated-vm | container | vm2 |
+|---------|-------------|-----------|-----|
+| JS-level sandboxing | Yes (V8 isolate) | No (full Node.js inside) | Yes (VM2 sandbox) |
+| Network isolation | No APIs exposed | OS-level (`--network=none`) | No APIs exposed |
+| File system isolation | No APIs exposed | OS-level (`--read-only`) | No APIs exposed |
+| `require`/`process` blocked | Yes | No (container boundary) | Yes |
+| Concurrency | Parallel | Serialized (one-at-a-time) | Parallel |
+| Startup overhead | Low | Higher (container + worker thread) | Low |
+| Security model | V8 process isolation | Container boundary | JS context isolation |
+
+### Container Executor Security Flags
+
+When using the container executor, each container runs with:
+
+```
+--network=none --read-only --cap-drop=ALL --user=node
+--tmpfs /tmp:rw,noexec,nosuid,size=64m
+--pids-limit=64 --memory=256m --cpus=1.0
+```
 
 ## How It Works
 
-1. **Connection**: Connects to all configured upstream MCP servers using Vercel AI SDK's MCP client
+1. **Connection**: Connects to all configured upstream MCP servers
 2. **Tool Collection**: Gathers tools from all servers via the MCP protocol
-3. **Tool Wrapping**: Uses @cloudflare/codemode SDK to wrap all tools
-4. **Code Generation**: SDK auto-generates TypeScript type definitions for tools
-5. **Exposure**: Exposes a single `codemode` MCP tool that agents can call
-6. **Execution**: Runs agent-generated code in isolated vm2 sandbox with tool access
+3. **Tool Wrapping**: Uses `@cloudflare/codemode` SDK to wrap all tools with auto-generated TypeScript definitions
+4. **Exposure**: Exposes two MCP tools -- `eval` (code execution) and `status` (introspection)
+5. **Execution**: Runs agent-generated code in the selected executor sandbox with tool access via `codemode.*`
 
-## Tool Discovery
+## MCP Tools
 
-When agents query the `codemode` tool schema, the auto-generated description includes:
+### `eval`
 
-- TypeScript type definitions for all available tools
-- Complete function signatures
-- Tool descriptions and parameter documentation
-- Example usage patterns
+Executes agent-generated JavaScript/TypeScript code with access to all upstream tools via the `codemode` namespace.
 
-This allows agents to discover the complete API surface by reading the tool description.
+```typescript
+// Example: cross-server orchestration
+const time = await codemode.time__get_current_time({ timezone: "America/New_York" });
+const pods = await codemode.kubernetes__pods_list_in_namespace({ namespace: "default" });
+return { time, podCount: pods.length };
+```
+
+### `status`
+
+Returns metadata about the running bridge: executor type, selection reason, timeout, and a list of all connected upstream servers with their tool counts.
 
 ## CLI Commands
 
@@ -115,95 +164,66 @@ codemode-bridge config edit <name>       # Edit server config
 codemode-bridge config info              # Show config file location
 ```
 
-## Examples
-
-### Using with mcporter
-
-```bash
-# Start the bridge
-codemode-bridge run --servers kubernetes &
-
-# List available tools
-mcporter list codemode-bridge --schema
-
-# Call the codemode tool
-mcporter call codemode-bridge.codemode code='async () => {
-  const namespaces = await codemode.kubernetes__namespaces_list({});
-  return namespaces;
-}'
-```
-
-### Using with Claude or other LLMs
-
-When connected as an MCP server, Claude can:
-
-1. See the `codemode` tool in its tool list
-2. Read auto-generated documentation about all available tools
-3. Write code that orchestrates multiple tools across servers
-4. Execute the code in an isolated sandbox
-
-Example code an LLM might write:
-
-```typescript
-// Get current time and convert to different timezone
-const now = await codemode.time__get_current_time({ timezone: "America/New_York" });
-const singapore = await codemode.time__convert_time({
-  source_timezone: "America/New_York",
-  target_timezone: "Asia/Singapore",
-  time: now
-});
-return { newYork: now, singapore };
-```
-
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│           MCP Clients (Claude, mcporter, etc)           │
-└────────────────────┬────────────────────────────────────┘
-                     │ MCP Protocol
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│         Code Mode Bridge (MCP Server)                   │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  Single "codemode" Tool                          │   │
-│  │  - Auto-generated type definitions               │   │
-│  │  - Sandbox code execution                        │   │
-│  │  - Tool orchestration                            │   │
-│  └──────────────────────────────────────────────────┘   │
-└────────────────────┬────────────────────────────────────┘
-                     │ @ai-sdk/mcp (MCP Client)
-        ┌────────────┼────────────┬─────────────┐
-        │            │            │             │
-   ┌────▼─────┐ ┌───▼────┐ ┌────▼──────┐ ┌───▼──────┐
-   │Kubernetes │ │  Time  │ │ GitLab    │ │ Memory   │
-   │  Server   │ │ Server │ │  Server   │ │  Server  │
-   └──────────┘ └────────┘ └───────────┘ └──────────┘
++---------------------------------------------------------+
+|           MCP Clients (Claude, OpenCode, etc)           |
++------------------------+--------------------------------+
+                         | MCP Protocol
+                         |
++------------------------v--------------------------------+
+|         Code Mode Bridge (MCP Server)                   |
+|  +--------------------------------------------------+   |
+|  |  "eval" Tool            "status" Tool             |   |
+|  |  - Auto-generated type definitions                |   |
+|  |  - Sandbox code execution                         |   |
+|  |  - Tool orchestration                             |   |
+|  +--------------------------------------------------+   |
+|  +--------------------------------------------------+   |
+|  |  Executor Registry                                |   |
+|  |  isolated-vm | container | vm2                    |   |
+|  +--------------------------------------------------+   |
++------------------------+--------------------------------+
+                         | MCP Client (@ai-sdk/mcp)
+            +------------+------------+-----------+
+            |            |            |           |
+       +----v-----+ +---v----+ +----v------+ +--v-------+
+       |Kubernetes | |  Time  | | GitLab    | | Memory   |
+       |  Server   | | Server | |  Server   | |  Server  |
+       +----------+ +--------+ +-----------+ +----------+
 ```
 
 ## Project Structure
 
 ```
 src/
-├── cli/
-│   ├── index.ts              # CLI entry point (with #!/usr/bin/env node shebang)
-│   ├── commands.ts           # Command implementations
-│   └── config-manager.ts     # Configuration management
-├── mcp/
-│   ├── server.ts             # MCP server + upstream connections
-│   ├── executor.ts           # VM2 sandbox executor implementation
-│   ├── mcp-adapter.ts        # Protocol adapter (AI SDK Tool → MCP)
-│   └── config.ts             # Configuration types
-└── index.ts                  # Package main entry point
-
-config/
-└── mcporter.json             # mcporter client configuration
-
-dist/                          # Compiled JavaScript (generated)
-.gitignore                     # Git ignore patterns
-package.json                   # NPM package configuration
-tsconfig.json                  # TypeScript configuration
-README.md                      # This file
++-- cli/
+|   +-- index.ts              # CLI entry point
+|   +-- commands.ts           # Command implementations
+|   +-- config-manager.ts     # Configuration file management
++-- executor/
+|   +-- vm2-executor.ts       # VM2 sandbox executor
+|   +-- isolated-vm-executor.ts  # isolated-vm V8 isolate executor
+|   +-- container-executor.ts # Docker/Podman container executor
+|   +-- container-runner.mjs  # Container main thread (stdin/stdout RPC)
+|   +-- container-worker.mjs  # Container worker thread (eval + console capture)
+|   +-- wrap-code.ts          # Shared code wrapping (acorn AST)
+|   +-- executor-test-suite.ts   # Universal executor test suite
+|   +-- executor-runner.test.ts  # Runs test suite against all executors
++-- mcp/
+|   +-- server.ts             # MCP server + upstream connections
+|   +-- executor.ts           # Executor factory, registry, and type exports
+|   +-- mcp-adapter.ts        # Protocol adapter (AI SDK Tool -> MCP)
+|   +-- mcp-client.ts         # Upstream MCP client management
+|   +-- config.ts             # Configuration types
+|   +-- oauth-handler.ts      # OAuth flow for HTTP MCP servers
+|   +-- token-persistence.ts  # OAuth token storage
+|   +-- e2e-bridge-test-suite.ts   # E2E bridge test suite
+|   +-- e2e-bridge-runner.test.ts  # Runs E2E suite against all executors
++-- utils/
+|   +-- logger.ts             # Winston logger
++-- index.ts                  # Package main entry point
 ```
 
 ## Development
@@ -214,48 +234,51 @@ README.md                      # This file
 npm run build
 ```
 
+### Test
+
+```bash
+# Run all tests (executor unit + E2E bridge, all 3 executors)
+npm test
+
+# Run E2E bridge tests only
+npm run test:e2e
+
+# Run tests with UI
+npx vitest --ui
+```
+
 ### Test CLI locally
 
 ```bash
-npm run dev:cli -- run --servers time
-npm run dev:cli -- config list
-npm run dev:cli -- config show kubernetes
-```
-
-### Rebuild and test after changes
-
-```bash
-npm run build
-npx codemode-bridge config list
+npm run dev -- run --servers time
+npm run dev -- config list
 ```
 
 ## Security
 
-- **Sandboxed execution**: Code runs in isolated vm2 environment
-- **Timeout enforcement**: 30-second limit prevents infinite loops
-- **No network access**: Sandbox cannot make direct HTTP requests
-- **No file system access**: Cannot read/write files on host
-- **Tool isolation**: Only tools from configured servers are accessible
+- **Multi-layer isolation**: Three executor backends with different security tradeoffs
+- **Timeout enforcement**: Configurable timeout (default 30s) prevents infinite loops
+- **No network access**: All executors block network access (JS-level or OS-level)
+- **No file system access**: Executors cannot read/write host files
+- **Tool isolation**: Only tools from configured upstream servers are accessible
+- **Container hardening**: Container executor runs non-root with dropped capabilities, read-only filesystem, PID/memory/CPU limits
 
 ## Prebuilt Servers
 
 The bridge comes pre-configured with popular MCP servers:
 
-- **kubernetes** - Kubernetes cluster operations
-- **swf_gitlab** - GitLab integration (with SWF instance)
-- **time** - Time operations and timezone conversion
-- **memory** - Knowledge graph memory system
-- **code-sandbox** - Sandboxed code execution
-- **mcp-git** - Git operations
-- **sequential-thinking** - Structured reasoning
-- **atlassian_cloud** - Atlassian cloud integration (HTTP)
+- **kubernetes** -- Kubernetes cluster operations
+- **swf_gitlab** -- GitLab integration
+- **time** -- Time operations and timezone conversion
+- **memory** -- Knowledge graph memory system
+- **code-sandbox** -- Sandboxed code execution via Docker containers
+- **mcp-git** -- Git operations
+- **sequential-thinking** -- Structured reasoning
+- **atlassian_cloud** -- Atlassian Cloud (Jira/Confluence) integration (HTTP + OAuth)
+- **microsoft/markitdown** -- Document to markdown conversion
 
 Run `codemode-bridge config list` to see all available servers.
 
 ## AI Generated Code Disclosure
-For anyone wondering, yes, this is almost entirely AI generated code. Though I consider it of fairly low risk given that it's sole purpose is to
-1. Run JS code in a VM2 environment.
-2. Bridge MCP servers to the VM2 sandbox.
-3. Most of this is built on top of existing libraries.
 
-I have not (yet) tested this extensively to see what the VM2 sandbox capabilities are. This is more of an experiment I had going in the background during the workday to see if I could get cloudflare's Code Mode to work... without paying for workers.
+This project is largely AI-generated. It serves as an experiment to get Cloudflare's Code Mode SDK working locally without paying for Workers, by bridging upstream MCP servers through a sandboxed executor.
