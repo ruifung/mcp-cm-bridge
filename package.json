@@ -1,5 +1,5 @@
 {
-  "name": "codemode-bridge",
+  "name": "@ruifung/codemode-bridge",
   "version": "1.0.0",
   "description": "MCP bridge that connects to upstream MCP servers and exposes tools via a single codemode tool for orchestration",
   "main": "dist/index.js",
@@ -27,7 +27,14 @@
   ],
   "author": "",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ruifung/mcp-cm-bridge.git"
+  },
   "type": "module",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "dependencies": {
     "@cloudflare/codemode": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.0",
