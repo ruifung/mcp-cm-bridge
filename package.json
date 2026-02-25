@@ -14,7 +14,8 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "dev:cli": "tsx src/cli/index.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "test:e2e": "vitest run src/mcp/e2e-bridge-runner.test.ts"
   },
   "keywords": [
     "mcp",
@@ -31,6 +32,7 @@
     "@cloudflare/codemode": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.0",
     "@types/node": "^25.3.0",
+    "acorn": "^8.16.0",
     "chalk": "^5.6.2",
     "commander": "^12.1.0",
     "isolated-vm": "^6.0.2",

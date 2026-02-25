@@ -1,6 +1,7 @@
 import type { Executor, ExecuteResult } from '@cloudflare/codemode';
 // @ts-ignore - isolated-vm is an optional dependency; this file is only loaded via dynamic import() when available
 import ivm from 'isolated-vm';
+import { wrapCode } from './wrap-code.js';
 const { Isolate, Context } = ivm;
 type IsolateType = InstanceType<typeof ivm.Isolate>;
 type ContextType = ReturnType<IsolateType['createContextSync']>;
@@ -295,10 +296,8 @@ export class IsolatedVmExecutor implements Executor {
             }).copyInto({ transferIn: true })
           );
 
-          // Wrap code in async IIFE if it's not already a function expression
-          const wrappedCode = `(async () => {
-${code.split('\n').map(line => '  ' + line).join('\n')}
-})()`;
+          // Wrap code so it returns a Promise we can .then()
+          const wrappedCode = wrapCode(code, { alwaysAsync: true });
 
           // Execute the async function and chain its Promise with .then()
           await context.eval(`(${wrappedCode}).then(protocol.resolve, protocol.reject);`);

@@ -22,7 +22,7 @@ export async function adaptAISDKToolToMCP(
   // - tool.execute (async function)
 
   // Extract tool name from description or use default
-  const toolName = "codemode";
+  const toolName = "eval";
 
   // Register the tool with the MCP server
   mcp.registerTool(

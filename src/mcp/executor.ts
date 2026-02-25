@@ -6,6 +6,7 @@
 import { VM } from "vm2";
 import type { Executor, ExecuteResult } from "@cloudflare/codemode";
 import { logInfo, logWarn } from "../utils/logger.js";
+import { wrapCode } from "../executor/wrap-code.js";
 
 /**
  * VM2-based Executor implementation
@@ -60,7 +61,7 @@ export class VM2Executor implements Executor {
       );
 
       // Prepare the code to run - wrap in async IIFE if not already wrapped
-      const wrappedCode = this.wrapCode(code);
+      const wrappedCode = wrapCode(code);
 
       // Create VM with sandbox containing console and codemode
       const vm = new VM({
@@ -113,31 +114,6 @@ export class VM2Executor implements Executor {
   }
 
   /**
-   * Wraps code in an async IIFE if it's not already wrapped
-   * This ensures the LLM-generated code can use await
-   */
-  private wrapCode(code: string): string {
-    const trimmed = code.trim();
-
-    // If it's already an async function or async arrow function, wrap in IIFE
-    if (
-      trimmed.startsWith("async") ||
-      trimmed.startsWith("async function")
-    ) {
-      return `(${trimmed})()`;
-    }
-
-    // If it's an arrow function (async or not), wrap in IIFE
-    // Match actual arrow function syntax: (params) => or param => or async (params) => or async param =>
-    if (/^\s*(async\s+)?(\([^)]*\)|[\w$]+)\s*=>/.test(trimmed)) {
-      return `(${trimmed})()`;
-    }
-
-    // Otherwise, assume it's a block of statements - wrap in async IIFE
-    return `(async () => { ${trimmed} })()`;
-  }
-
-  /**
    * Safely stringify values for logging
    */
   private stringify(value: unknown): string {
@@ -173,19 +149,36 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
 }
 
 /**
+ * Metadata about the executor that was created.
+ */
+export interface ExecutorInfo {
+  /** The executor type: 'vm2' or 'isolated-vm' */
+  type: 'vm2' | 'isolated-vm';
+  /** How the executor was selected */
+  reason: 'explicit' | 'auto-detected' | 'fallback';
+  /** Execution timeout in ms */
+  timeout: number;
+}
+
+/**
  * Factory function to create an Executor instance.
  *
  * Selection logic:
  *   1. EXECUTOR_TYPE=vm2         → always use vm2
  *   2. EXECUTOR_TYPE=isolated-vm → always use isolated-vm (throws if unavailable)
  *   3. EXECUTOR_TYPE unset       → prefer isolated-vm, fall back to vm2
+ *
+ * Returns both the executor and metadata about the selection.
  */
-export async function createExecutor(timeout = 30000): Promise<Executor> {
+export async function createExecutor(timeout = 30000): Promise<{ executor: Executor; info: ExecutorInfo }> {
   const requested = process.env.EXECUTOR_TYPE?.toLowerCase();
 
   if (requested === 'vm2') {
     logInfo('Using vm2 executor (EXECUTOR_TYPE=vm2)', { component: 'Executor' });
-    return new VM2Executor(timeout);
+    return {
+      executor: new VM2Executor(timeout),
+      info: { type: 'vm2', reason: 'explicit', timeout },
+    };
   }
 
   if (requested === 'isolated-vm') {
@@ -198,7 +191,10 @@ export async function createExecutor(timeout = 30000): Promise<Executor> {
     }
     logInfo('Using isolated-vm executor (EXECUTOR_TYPE=isolated-vm)', { component: 'Executor' });
     const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
-    return createIsolatedVmExecutor({ timeout });
+    return {
+      executor: createIsolatedVmExecutor({ timeout }),
+      info: { type: 'isolated-vm', reason: 'explicit', timeout },
+    };
   }
 
   // Default: prefer isolated-vm, fall back to vm2
@@ -206,9 +202,15 @@ export async function createExecutor(timeout = 30000): Promise<Executor> {
   if (available) {
     logInfo('Using isolated-vm executor (auto-detected)', { component: 'Executor' });
     const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
-    return createIsolatedVmExecutor({ timeout });
+    return {
+      executor: createIsolatedVmExecutor({ timeout }),
+      info: { type: 'isolated-vm', reason: 'auto-detected', timeout },
+    };
   }
 
   logWarn('isolated-vm not available, falling back to vm2 executor', { component: 'Executor' });
-  return new VM2Executor(timeout);
+  return {
+    executor: new VM2Executor(timeout),
+    info: { type: 'vm2', reason: 'fallback', timeout },
+  };
 }

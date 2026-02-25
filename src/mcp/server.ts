@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { z } from "zod";
-import { createExecutor } from "./executor.js";
+import { createExecutor, type ExecutorInfo } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
@@ -31,7 +31,7 @@ export type { MCPServerConfig }
  * Convert JSON Schema to Zod schema
  * MCP tools use JSON Schema, but createCodeTool expects Zod schemas
  */
-function jsonSchemaToZod(schema: any): z.ZodType<any> {
+export function jsonSchemaToZod(schema: any): z.ZodType<any> {
   // Handle null/undefined
   if (!schema) {
     return z.object({}).strict();
@@ -337,7 +337,7 @@ export async function startCodeModeBridgeServer(
   }
 
   // Create the executor using the codemode SDK pattern
-  const executor = await createExecutor(30000); // 30 second timeout
+  const { executor, info: executorInfo } = await createExecutor(30000); // 30 second timeout
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
@@ -355,6 +355,36 @@ export async function startCodeModeBridgeServer(
   // The adaptAISDKToolToMCP function handles the protocol conversion
   await adaptAISDKToolToMCP(mcp, codemodeTool);
 
+  // Register the status tool — returns executor mode, upstream servers, and tool counts
+  mcp.registerTool(
+    "status",
+    {
+      description: "Get the current status of the codemode bridge: executor mode, upstream server connections, and available tools.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => {
+      const servers = Object.entries(toolsByServer).map(([name, tools]) => ({
+        name,
+        toolCount: tools.length,
+        tools,
+      }));
+
+      const status = {
+        executor: {
+          type: executorInfo.type,
+          reason: executorInfo.reason,
+          timeout: executorInfo.timeout,
+        },
+        servers,
+        totalTools: totalToolCount,
+      };
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+      } as any;
+    }
+  );
+
   // Connect downstream MCP transport (what the client connects to)
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
@@ -364,5 +394,5 @@ export async function startCodeModeBridgeServer(
   logDebug(`Registering tool request handler`, {
     component: 'Bridge'
   });
-  logInfo(`Exposing single 'codemode' tool`, { component: 'Bridge' });
+  logInfo(`Exposing 'eval' and 'status' tools`, { component: 'Bridge' });
 }
