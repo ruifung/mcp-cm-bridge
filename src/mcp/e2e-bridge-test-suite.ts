@@ -169,7 +169,7 @@ async function createBridgePipeline(upstreamClient: Client, serverName: string, 
   await bridgeServer.connect(downstreamServerTransport);
   await downstreamClient.connect(downstreamClientTransport);
 
-  return { bridgeServer, downstreamClient, downstreamClientTransport, downstreamServerTransport };
+  return { bridgeServer, downstreamClient, downstreamClientTransport, downstreamServerTransport, _executor: executor };
 }
 
 /**
@@ -192,10 +192,28 @@ async function callCodemode(
 
 // ── Test Suite Factory ──────────────────────────────────────────────────────
 
+export interface E2EBridgeTestSuiteOptions {
+  /** Test names to skip (exact match against it() description) */
+  skipTests?: string[];
+  /** Per-test timeout in ms (default: vitest default) */
+  testTimeout?: number;
+}
+
 export function createE2EBridgeTestSuite(
   executorName: string,
   createExecutor: () => Executor,
+  options?: E2EBridgeTestSuiteOptions,
 ) {
+  const skipSet = new Set(options?.skipTests ?? []);
+  /** Use it.skip for tests in the skip list, it otherwise */
+  const testOrSkip = (testName: string, fn: () => Promise<void> | void) => {
+    if (skipSet.has(testName)) {
+      it.skip(testName, fn);
+    } else {
+      it(testName, fn, options?.testTimeout);
+    }
+  };
+
   describe(`E2E Bridge Pipeline [${executorName}]`, () => {
     let upstreamState: Awaited<ReturnType<typeof createMockUpstreamServer>>;
     let bridgeState: Awaited<ReturnType<typeof createBridgePipeline>>;
@@ -204,34 +222,44 @@ export function createE2EBridgeTestSuite(
     beforeAll(async () => {
       upstreamState = await createMockUpstreamServer();
       const executor = createExecutor();
+      // If executor has a lazy init (e.g. container), trigger it now so the
+      // startup cost is not counted against the first test's timeout.
+      if ('init' in executor && typeof (executor as any).init === 'function') {
+        await (executor as any).init();
+      }
       bridgeState = await createBridgePipeline(upstreamState.upstreamClient, 'test', executor);
       client = bridgeState.downstreamClient;
-    });
+    }, options?.testTimeout ? options.testTimeout * 2 : undefined);
 
     afterAll(async () => {
       await bridgeState.downstreamClient.close();
       await bridgeState.bridgeServer.close();
       await upstreamState.upstreamClient.close();
       await upstreamState.upstream.close();
+      // Cleanup executor if it has a dispose method
+      const executor = (bridgeState as any)._executor;
+      if (executor && 'dispose' in executor && typeof executor.dispose === 'function') {
+        await Promise.resolve(executor.dispose());
+      }
     });
 
     // ── Tool Discovery ──────────────────────────────────────────────────
 
     describe('Tool Discovery', () => {
-      it('should expose a single codemode tool', async () => {
+      testOrSkip('should expose a single codemode tool', async () => {
         const { tools } = await client.listTools();
         expect(tools).toHaveLength(1);
         expect(tools[0].name).toBe('eval');
       });
 
-      it('should have code input schema', async () => {
+      testOrSkip('should have code input schema', async () => {
         const { tools } = await client.listTools();
         const codemodeTool = tools[0];
         expect(codemodeTool.inputSchema).toBeDefined();
         expect(codemodeTool.inputSchema.properties).toHaveProperty('code');
       });
 
-      it('should include tool descriptions from upstream', async () => {
+      testOrSkip('should include tool descriptions from upstream', async () => {
         const { tools } = await client.listTools();
         const description = tools[0].description || '';
         expect(description).toContain('test__add');
@@ -242,22 +270,22 @@ export function createE2EBridgeTestSuite(
     // ── Simple Code Execution ───────────────────────────────────────────
 
     describe('Simple Code Execution', () => {
-      it('should execute arithmetic and return result', async () => {
+      testOrSkip('should execute arithmetic and return result', async () => {
         const output = await callCodemode(client, 'async () => { return 1 + 2; }');
         expect(output.result).toBe(3);
       });
 
-      it('should execute string operations', async () => {
+      testOrSkip('should execute string operations', async () => {
         const output = await callCodemode(client, 'async () => { return "hello" + " " + "world"; }');
         expect(output.result).toBe('hello world');
       });
 
-      it('should execute object construction', async () => {
+      testOrSkip('should execute object construction', async () => {
         const output = await callCodemode(client, 'async () => { return { a: 1, b: [2, 3] }; }');
         expect(output.result).toEqual({ a: 1, b: [2, 3] });
       });
 
-      it('should handle async/await code', async () => {
+      testOrSkip('should handle async/await code', async () => {
         const output = await callCodemode(
           client,
           'async () => { const p = Promise.resolve(42); return await p; }',
@@ -265,7 +293,7 @@ export function createE2EBridgeTestSuite(
         expect(output.result).toBe(42);
       });
 
-      it('should echo back the original code', async () => {
+      testOrSkip('should echo back the original code', async () => {
         const code = 'async () => { return 99; }';
         const output = await callCodemode(client, code);
         expect(output.code).toBe(code);
@@ -275,7 +303,7 @@ export function createE2EBridgeTestSuite(
     // ── Tool Invocation Through Bridge ──────────────────────────────────
 
     describe('Tool Invocation', () => {
-      it('should call upstream add tool and return result', async () => {
+      testOrSkip('should call upstream add tool and return result', async () => {
         const output = await callCodemode(
           client,
           'async () => { const r = await codemode.test__add({ a: 5, b: 3 }); return r; }',
@@ -286,7 +314,7 @@ export function createE2EBridgeTestSuite(
         expect(JSON.parse(content)).toBe(8);
       });
 
-      it('should call upstream echo tool', async () => {
+      testOrSkip('should call upstream echo tool', async () => {
         const output = await callCodemode(
           client,
           'async () => { const r = await codemode.test__echo({ text: "hello bridge" }); return r; }',
@@ -295,7 +323,7 @@ export function createE2EBridgeTestSuite(
         expect(content).toBe('hello bridge');
       });
 
-      it('should call upstream get_user tool with structured response', async () => {
+      testOrSkip('should call upstream get_user tool with structured response', async () => {
         const output = await callCodemode(
           client,
           'async () => { const r = await codemode.test__get_user({ id: 42 }); return JSON.parse(r.content[0].text); }',
@@ -303,7 +331,7 @@ export function createE2EBridgeTestSuite(
         expect(output.result).toEqual({ id: 42, name: 'User 42', email: 'user42@test.com' });
       });
 
-      it('should call multiple tools sequentially', async () => {
+      testOrSkip('should call multiple tools sequentially', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -318,7 +346,7 @@ export function createE2EBridgeTestSuite(
         expect(output.result).toEqual({ sum: 30, product: 21 });
       });
 
-      it('should call tools in parallel with Promise.all', async () => {
+      testOrSkip('should call tools in parallel with Promise.all', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -341,7 +369,7 @@ export function createE2EBridgeTestSuite(
     // ── Tool Chaining & Data Flow ───────────────────────────────────────
 
     describe('Tool Chaining', () => {
-      it('should chain tool outputs as inputs to subsequent tool calls', async () => {
+      testOrSkip('should chain tool outputs as inputs to subsequent tool calls', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -354,7 +382,7 @@ export function createE2EBridgeTestSuite(
         expect(output.result).toBe(30); // (5 + 10) * 2
       });
 
-      it('should iterate over tool results', async () => {
+      testOrSkip('should iterate over tool results', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -367,7 +395,7 @@ export function createE2EBridgeTestSuite(
         expect(output.result).toEqual(['Item 1', 'Item 2', 'Item 3']);
       });
 
-      it('should aggregate results from multiple tool calls', async () => {
+      testOrSkip('should aggregate results from multiple tool calls', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -387,7 +415,7 @@ export function createE2EBridgeTestSuite(
     // ── Error Handling ──────────────────────────────────────────────────
 
     describe('Error Handling', () => {
-      it('should handle code execution errors gracefully', async () => {
+      testOrSkip('should handle code execution errors gracefully', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { throw new Error("boom"); }' },
@@ -396,7 +424,7 @@ export function createE2EBridgeTestSuite(
         expect(text).toContain('boom');
       });
 
-      it('should handle syntax errors in user code', async () => {
+      testOrSkip('should handle syntax errors in user code', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { this is not valid javascript!!! }' },
@@ -405,7 +433,7 @@ export function createE2EBridgeTestSuite(
         expect(text.length).toBeGreaterThan(0);
       });
 
-      it('should return error response from upstream tool (does not throw)', async () => {
+      testOrSkip('should return error response from upstream tool (does not throw)', async () => {
         // MCP SDK's callTool does NOT throw on upstream tool errors — it returns
         // an error response object. So the sandbox code receives the response,
         // not an exception.
@@ -424,7 +452,7 @@ export function createE2EBridgeTestSuite(
         expect(content.toLowerCase()).toContain('error');
       });
 
-      it('should handle calling non-existent tools', async () => {
+      testOrSkip('should handle calling non-existent tools', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { return await codemode.test__nonexistent({}); }' },
@@ -437,7 +465,7 @@ export function createE2EBridgeTestSuite(
     // ── Console Logging ─────────────────────────────────────────────────
 
     describe('Console Logging', () => {
-      it('should capture console.log output', async () => {
+      testOrSkip('should capture console.log output', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -450,7 +478,7 @@ export function createE2EBridgeTestSuite(
         expect(output.logs).toContain('hello from sandbox');
       });
 
-      it('should capture multiple log lines', async () => {
+      testOrSkip('should capture multiple log lines', async () => {
         const output = await callCodemode(
           client,
           `async () => {
@@ -466,7 +494,7 @@ export function createE2EBridgeTestSuite(
         expect(output.logs).toContain('line 3');
       });
 
-      it('should not include logs key when no console output', async () => {
+      testOrSkip('should not include logs key when no console output', async () => {
         const output = await callCodemode(client, 'async () => { return 1; }');
         expect(output.logs).toBeUndefined();
       });
@@ -475,17 +503,17 @@ export function createE2EBridgeTestSuite(
     // ── Code Normalization ──────────────────────────────────────────────
 
     describe('Code Normalization', () => {
-      it('should handle bare return statements (auto-wrapped)', async () => {
+      testOrSkip('should handle bare return statements (auto-wrapped)', async () => {
         const output = await callCodemode(client, 'return 42;');
         expect(output.result).toBe(42);
       });
 
-      it('should handle expression-only code', async () => {
+      testOrSkip('should handle expression-only code', async () => {
         const output = await callCodemode(client, '1 + 2 + 3');
         expect(output.result).toBe(6);
       });
 
-      it('should handle arrow function without async', async () => {
+      testOrSkip('should handle arrow function without async', async () => {
         const output = await callCodemode(client, '() => { return 7; }');
         expect(output.result).toBe(7);
       });
@@ -494,7 +522,7 @@ export function createE2EBridgeTestSuite(
     // ── Isolation & Safety ──────────────────────────────────────────────
 
     describe('Isolation', () => {
-      it('should not allow require access', async () => {
+      testOrSkip('should not allow require access', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { return require("fs"); }' },
@@ -503,7 +531,7 @@ export function createE2EBridgeTestSuite(
         expect(text.toLowerCase()).toMatch(/error|not defined|not allowed/);
       });
 
-      it('should not allow process access', async () => {
+      testOrSkip('should not allow process access', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { return process.env; }' },
@@ -512,7 +540,7 @@ export function createE2EBridgeTestSuite(
         expect(text.toLowerCase()).toMatch(/error|not defined|not allowed/);
       });
 
-      it('should isolate state between executions', async () => {
+      testOrSkip('should isolate state between executions', async () => {
         await callCodemode(client, 'async () => { globalThis.__test = 123; return "set"; }');
 
         const output = await callCodemode(
@@ -526,7 +554,7 @@ export function createE2EBridgeTestSuite(
     // ── Response Format ─────────────────────────────────────────────────
 
     describe('Response Format', () => {
-      it('should return well-formed MCP content', async () => {
+      testOrSkip('should return well-formed MCP content', async () => {
         const response = await client.callTool({
           name: 'eval',
           arguments: { code: 'async () => { return { answer: 42 }; }' },
@@ -545,7 +573,7 @@ export function createE2EBridgeTestSuite(
         expect(parsed.result).toEqual({ answer: 42 });
       });
 
-      it('should include code field echoing the input', async () => {
+      testOrSkip('should include code field echoing the input', async () => {
         const code = 'async () => { return "test"; }';
         const response = await client.callTool({
           name: 'eval',

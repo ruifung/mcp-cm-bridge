@@ -8,6 +8,7 @@
 import { createE2EBridgeTestSuite } from './e2e-bridge-test-suite.js';
 import { VM2Executor } from './executor.js';
 import { createIsolatedVmExecutor } from '../executor/isolated-vm-executor.js';
+import { createContainerExecutor } from '../executor/container-executor.js';
 
 // Run E2E suite against vm2 executor (bridge version from src/mcp/executor.ts)
 createE2EBridgeTestSuite('vm2', () => new VM2Executor(10000));
@@ -16,3 +17,15 @@ createE2EBridgeTestSuite('vm2', () => new VM2Executor(10000));
 createE2EBridgeTestSuite('isolated-vm', () =>
   createIsolatedVmExecutor({ memoryLimit: 256, timeout: 10000 }),
 );
+
+// Run E2E suite against container executor (Docker/Podman)
+// Container provides OS-level isolation (network=none, read-only, cap-drop=ALL)
+// rather than JS-level sandboxing, so require/process ARE available inside.
+createE2EBridgeTestSuite('container', () => createContainerExecutor(), {
+  skipTests: [
+    // JS-level isolation — container runs full Node.js
+    'should not allow require access',
+    'should not allow process access',
+  ],
+  testTimeout: 30000,
+});

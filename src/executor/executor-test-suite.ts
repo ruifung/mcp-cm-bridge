@@ -15,32 +15,56 @@ import type { Executor, ExecuteResult } from '@cloudflare/codemode';
  * createExecutorTestSuite('vm2', () => createVM2Executor());
  * ```
  */
+
+export interface ExecutorTestSuiteOptions {
+  /** Test names to skip (exact match against it() description) */
+  skipTests?: string[];
+  /** Per-test timeout in ms (default: vitest default) */
+  testTimeout?: number;
+}
+
 export function createExecutorTestSuite(
   name: string,
-  createExecutor: () => Executor
+  createExecutor: () => Executor,
+  options?: ExecutorTestSuiteOptions
 ) {
+  const skipSet = new Set(options?.skipTests ?? []);
+  /** Use it.skip for tests in the skip list, it otherwise */
+  const testOrSkip = (testName: string, fn: () => Promise<void> | void) => {
+    if (skipSet.has(testName)) {
+      it.skip(testName, fn);
+    } else {
+      it(testName, fn, options?.testTimeout);
+    }
+  };
+
   describe(`Executor: ${name}`, () => {
     let executor: Executor;
 
-    beforeAll(() => {
+    beforeAll(async () => {
       executor = createExecutor();
-    });
+      // If executor has a lazy init (e.g. container), trigger it now so the
+      // startup cost is not counted against the first test's timeout.
+      if ('init' in executor && typeof (executor as any).init === 'function') {
+        await (executor as any).init();
+      }
+    }, options?.testTimeout ? options.testTimeout * 2 : undefined);
 
-    afterAll(() => {
+    afterAll(async () => {
       // Cleanup if executor has dispose method
       if ('dispose' in executor && typeof executor.dispose === 'function') {
-        (executor.dispose as () => void)();
+        await Promise.resolve((executor.dispose as () => void)());
       }
     });
 
     describe('Basic Execution', () => {
-      it('should execute simple arithmetic', async () => {
+      testOrSkip('should execute simple arithmetic', async () => {
         const result = await executor.execute('return 1 + 2;', {});
         expect(result.result).toBe(3);
         expect(result.error).toBeUndefined();
       });
 
-      it('should execute async code', async () => {
+      testOrSkip('should execute async code', async () => {
         const result = await executor.execute(
           `
           const promise = new Promise(resolve => 
@@ -53,17 +77,17 @@ export function createExecutorTestSuite(
         expect(result.result).toBe(42);
       });
 
-      it('should return undefined for no return statement', async () => {
+      testOrSkip('should return undefined for no return statement', async () => {
         const result = await executor.execute('const x = 5;', {});
         expect(result.result).toBeUndefined();
       });
 
-      it('should handle string returns', async () => {
+      testOrSkip('should handle string returns', async () => {
         const result = await executor.execute('return "hello";', {});
         expect(result.result).toBe('hello');
       });
 
-      it('should handle object returns', async () => {
+      testOrSkip('should handle object returns', async () => {
         const result = await executor.execute(
           'return { a: 1, b: "two", c: [1, 2, 3] };',
           {}
@@ -77,7 +101,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Console Logging', () => {
-      it('should capture console.log output', async () => {
+      testOrSkip('should capture console.log output', async () => {
         const result = await executor.execute(
           `
           console.log('Hello');
@@ -90,7 +114,7 @@ export function createExecutorTestSuite(
         expect(result.logs).toContain('World');
       });
 
-      it('should capture multiple arguments', async () => {
+      testOrSkip('should capture multiple arguments', async () => {
         const result = await executor.execute(
           `console.log('Result:', 42, { key: 'value' });`,
           {}
@@ -99,20 +123,20 @@ export function createExecutorTestSuite(
         expect(result.logs?.[0]).toContain('42');
       });
 
-      it('should not include logs key when empty', async () => {
+      testOrSkip('should not include logs key when empty', async () => {
         const result = await executor.execute('return 5;', {});
         expect(result.logs).toBeUndefined();
       });
     });
 
     describe('Error Handling', () => {
-      it('should catch syntax errors', async () => {
+      testOrSkip('should catch syntax errors', async () => {
         const result = await executor.execute('this is not valid js', {});
         expect(result.error).toBeDefined();
         expect(result.result).toBeUndefined();
       });
 
-      it('should catch runtime errors', async () => {
+      testOrSkip('should catch runtime errors', async () => {
         const result = await executor.execute(
           'throw new Error("Test error");',
           {}
@@ -121,7 +145,7 @@ export function createExecutorTestSuite(
         expect(result.result).toBeUndefined();
       });
 
-      it('should catch reference errors', async () => {
+      testOrSkip('should catch reference errors', async () => {
         const result = await executor.execute(
           'return nonExistentVariable;',
           {}
@@ -129,7 +153,7 @@ export function createExecutorTestSuite(
         expect(result.error).toBeDefined();
       });
 
-      it('should not throw exceptions, return them', async () => {
+      testOrSkip('should not throw exceptions, return them', async () => {
         // Verify that the executor doesn't throw, only returns errors
         const promise = executor.execute(
           'throw new Error("Should not throw");',
@@ -140,7 +164,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Tool Invocation', () => {
-      it('should invoke tool functions', async () => {
+      testOrSkip('should invoke tool functions', async () => {
         const mockTool = vi.fn(async () => 42);
 
         const result = await executor.execute(
@@ -152,7 +176,7 @@ export function createExecutorTestSuite(
         expect(mockTool).toHaveBeenCalled();
       });
 
-      it('should pass arguments to tool functions', async () => {
+      testOrSkip('should pass arguments to tool functions', async () => {
         const mockTool = vi.fn(async (a: number, b: number) => a + b);
 
         const result = await executor.execute(
@@ -164,7 +188,7 @@ export function createExecutorTestSuite(
         expect(mockTool).toHaveBeenCalledWith(5, 3);
       });
 
-      it('should support tool with object arguments', async () => {
+      testOrSkip('should support tool with object arguments', async () => {
         const mockTool = vi.fn(async (opts: { name: string; value: number }) =>
           `${opts.name}=${opts.value}`
         );
@@ -181,7 +205,7 @@ export function createExecutorTestSuite(
         });
       });
 
-      it('should handle async tool errors', async () => {
+      testOrSkip('should handle async tool errors', async () => {
         const mockTool = vi.fn(async () => {
           throw new Error('Tool failed');
         });
@@ -203,7 +227,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Complex Code Patterns', () => {
-      it('should handle for loops', async () => {
+      testOrSkip('should handle for loops', async () => {
         const result = await executor.execute(
           `
           let sum = 0;
@@ -217,7 +241,7 @@ export function createExecutorTestSuite(
         expect(result.result).toBe(45);
       });
 
-      it('should handle map/filter/reduce', async () => {
+      testOrSkip('should handle map/filter/reduce', async () => {
         const result = await executor.execute(
           `
           const arr = [1, 2, 3, 4, 5];
@@ -231,7 +255,7 @@ export function createExecutorTestSuite(
         expect(result.result).toBe(24); // (3+4+5) * 2 = 24
       });
 
-      it('should handle try-catch', async () => {
+      testOrSkip('should handle try-catch', async () => {
         const result = await executor.execute(
           `
           try {
@@ -245,7 +269,7 @@ export function createExecutorTestSuite(
         expect(result.result).toBe('Caught!');
       });
 
-      it('should handle class definitions', async () => {
+      testOrSkip('should handle class definitions', async () => {
         const result = await executor.execute(
           `
           class Counter {
@@ -264,7 +288,7 @@ export function createExecutorTestSuite(
         expect(result.result).toBe(6);
       });
 
-      it('should handle async/await chains', async () => {
+      testOrSkip('should handle async/await chains', async () => {
         const mockFetch = vi.fn(async (id: number) => ({ id, name: `Item ${id}` }));
 
         const result = await executor.execute(
@@ -283,7 +307,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Isolation & Safety', () => {
-      it('should not allow access to require', async () => {
+      testOrSkip('should not allow access to require', async () => {
         const result = await executor.execute(
           'return require("fs");',
           {}
@@ -291,7 +315,7 @@ export function createExecutorTestSuite(
         expect(result.error).toBeDefined();
       });
 
-      it('should not allow process access', async () => {
+      testOrSkip('should not allow process access', async () => {
         const result = await executor.execute(
           'return process.env;',
           {}
@@ -299,7 +323,7 @@ export function createExecutorTestSuite(
         expect(result.error).toBeDefined();
       });
 
-      it('should not allow eval', async () => {
+      testOrSkip('should not allow eval', async () => {
         const result = await executor.execute(
           'return eval("1+1");',
           {}
@@ -307,7 +331,7 @@ export function createExecutorTestSuite(
         expect(result.error).toBeDefined();
       });
 
-      it('should not allow constructor to escape', async () => {
+      testOrSkip('should not allow constructor to escape', async () => {
         const result = await executor.execute(
           'return (function(){}).constructor("return process")();',
           {}
@@ -315,7 +339,114 @@ export function createExecutorTestSuite(
         expect(result.error).toBeDefined();
       });
 
-      it('should isolate prototype pollution to the current execution', async () => {
+      testOrSkip('should not allow network access', async () => {
+        // All executors must prevent outbound network access:
+        // - vm2/isolated-vm: no require/fetch/net globals available
+        // - container: --network=none blocks at OS level
+        const result = await executor.execute(
+          `
+          // Try multiple network vectors
+          if (typeof fetch === 'function') {
+            await fetch('https://example.com');
+            return 'network allowed via fetch';
+          }
+          if (typeof require === 'function') {
+            const http = require('http');
+            await new Promise((resolve, reject) => {
+              http.get('http://example.com', resolve).on('error', reject);
+            });
+            return 'network allowed via http';
+          }
+          // If neither is available, that itself is blocking network access
+          throw new Error('no network APIs available');
+          `,
+          {}
+        );
+        // Must either error or return no success indicator
+        if (result.error) {
+          // Good — network was blocked or APIs unavailable
+          expect(result.error).toBeDefined();
+        } else {
+          // Should never reach here with 'network allowed' messages
+          expect(result.result).not.toBe('network allowed via fetch');
+          expect(result.result).not.toBe('network allowed via http');
+        }
+      });
+
+      testOrSkip('should not allow low-level socket network access', async () => {
+        // Validates that raw TCP/UDP socket APIs are blocked.
+        // - vm2/isolated-vm: require/net/dgram not available
+        // - container: --network=none blocks at OS level even if APIs exist
+        const result = await executor.execute(
+          `
+          if (typeof require === 'function') {
+            // Try net.Socket (TCP)
+            try {
+              const net = require('net');
+              await new Promise((resolve, reject) => {
+                const sock = new net.Socket();
+                sock.setTimeout(2000);
+                sock.on('error', reject);
+                sock.on('timeout', () => reject(new Error('timeout')));
+                sock.connect(80, '1.1.1.1', resolve);
+              });
+              return 'network allowed via net.Socket';
+            } catch (e) {}
+
+            // Try dgram (UDP)
+            try {
+              const dgram = require('dgram');
+              const sock = dgram.createSocket('udp4');
+              await new Promise((resolve, reject) => {
+                sock.on('error', reject);
+                sock.send('ping', 53, '1.1.1.1', (err) => {
+                  sock.close();
+                  err ? reject(err) : resolve();
+                });
+              });
+              return 'network allowed via dgram';
+            } catch (e) {}
+
+            // Try tls.connect
+            try {
+              const tls = require('tls');
+              await new Promise((resolve, reject) => {
+                const sock = tls.connect(443, '1.1.1.1', {}, resolve);
+                sock.on('error', reject);
+              });
+              return 'network allowed via tls';
+            } catch (e) {}
+
+            // Try dns.resolve
+            try {
+              const dns = require('dns');
+              await new Promise((resolve, reject) => {
+                dns.resolve('example.com', (err, addresses) => {
+                  err ? reject(err) : resolve(addresses);
+                });
+              });
+              return 'network allowed via dns';
+            } catch (e) {}
+
+            // All low-level socket APIs failed — network is blocked
+            throw new Error('all socket APIs blocked by network isolation');
+          }
+          // No require means no access to socket APIs at all
+          throw new Error('no require available');
+          `,
+          {}
+        );
+        if (result.error) {
+          expect(result.error).toBeDefined();
+        } else {
+          expect(result.result).not.toBe('network allowed via net.Socket');
+          expect(result.result).not.toBe('network allowed via dgram');
+          expect(result.result).not.toBe('network allowed via tls');
+          expect(result.result).not.toBe('network allowed via dns');
+        }
+      });
+
+      testOrSkip('should isolate prototype pollution to the current execution', async () => {
         // NOTE: Prototype pollution IS possible within a single execution,
         // but it is NOT a security risk because:
         // 1. Each execution gets a fresh sandbox with clean prototypes
@@ -347,7 +478,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Concurrency', () => {
-      it('should handle multiple concurrent executions', async () => {
+      testOrSkip('should handle multiple concurrent executions', async () => {
         const promises = Array.from({ length: 5 }, (_, i) =>
           executor.execute(`return ${i * 10};`, {})
         );
@@ -359,7 +490,7 @@ export function createExecutorTestSuite(
         });
       });
 
-      it('should isolate data between concurrent executions', async () => {
+      testOrSkip('should isolate data between concurrent executions', async () => {
         const promises = Array.from({ length: 3 }, (_, i) =>
           executor.execute(
             `
@@ -380,7 +511,7 @@ export function createExecutorTestSuite(
     });
 
     describe('Performance Baseline', () => {
-      it('should execute simple code quickly', async () => {
+      testOrSkip('should execute simple code quickly', async () => {
         const start = performance.now();
         await executor.execute('return 1 + 1;', {});
         const elapsed = performance.now() - start;
@@ -389,7 +520,7 @@ export function createExecutorTestSuite(
         expect(elapsed).toBeLessThan(100);
       });
 
-      it('should handle multiple sequential executions', async () => {
+      testOrSkip('should handle multiple sequential executions', async () => {
         const start = performance.now();
 
         for (let i = 0; i < 10; i++) {

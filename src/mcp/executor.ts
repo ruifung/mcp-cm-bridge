@@ -4,6 +4,7 @@
  */
 
 import { VM } from "vm2";
+import { execFileSync } from "node:child_process";
 import type { Executor, ExecuteResult } from "@cloudflare/codemode";
 import { logInfo, logWarn } from "../utils/logger.js";
 import { wrapCode } from "../executor/wrap-code.js";
@@ -152,8 +153,8 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
  * Metadata about the executor that was created.
  */
 export interface ExecutorInfo {
-  /** The executor type: 'vm2' or 'isolated-vm' */
-  type: 'vm2' | 'isolated-vm';
+  /** The executor type: 'vm2', 'isolated-vm', or 'container' */
+  type: 'vm2' | 'isolated-vm' | 'container';
   /** How the executor was selected */
   reason: 'explicit' | 'auto-detected' | 'fallback';
   /** Execution timeout in ms */
@@ -161,12 +162,33 @@ export interface ExecutorInfo {
 }
 
 /**
+ * Check if a container runtime (Docker/Podman) is available.
+ */
+let containerRuntimeAvailable: boolean | null = null;
+
+function isContainerRuntimeAvailable(): boolean {
+  if (containerRuntimeAvailable !== null) return containerRuntimeAvailable;
+  for (const cmd of ['docker', 'podman']) {
+    try {
+      execFileSync(cmd, ['--version'], { stdio: 'ignore', timeout: 5000 });
+      containerRuntimeAvailable = true;
+      return true;
+    } catch {
+      // not available
+    }
+  }
+  containerRuntimeAvailable = false;
+  return false;
+}
+
+/**
  * Factory function to create an Executor instance.
  *
  * Selection logic:
- *   1. EXECUTOR_TYPE=vm2         → always use vm2
- *   2. EXECUTOR_TYPE=isolated-vm → always use isolated-vm (throws if unavailable)
- *   3. EXECUTOR_TYPE unset       → prefer isolated-vm, fall back to vm2
+ *   1. EXECUTOR_TYPE=vm2         -> always use vm2
+ *   2. EXECUTOR_TYPE=isolated-vm -> always use isolated-vm (throws if unavailable)
+ *   3. EXECUTOR_TYPE=container   -> always use container executor (throws if no runtime)
+ *   4. EXECUTOR_TYPE unset       -> prefer isolated-vm, fall back to vm2
  *
  * Returns both the executor and metadata about the selection.
  */
@@ -194,6 +216,21 @@ export async function createExecutor(timeout = 30000): Promise<{ executor: Execu
     return {
       executor: createIsolatedVmExecutor({ timeout }),
       info: { type: 'isolated-vm', reason: 'explicit', timeout },
+    };
+  }
+
+  if (requested === 'container') {
+    if (!isContainerRuntimeAvailable()) {
+      throw new Error(
+        'EXECUTOR_TYPE=container but no container runtime found. ' +
+        'Install Docker or Podman, or set CONTAINER_RUNTIME to the path of your runtime.'
+      );
+    }
+    logInfo('Using container executor (EXECUTOR_TYPE=container)', { component: 'Executor' });
+    const { createContainerExecutor } = await import('../executor/container-executor.js');
+    return {
+      executor: createContainerExecutor({ timeout }),
+      info: { type: 'container', reason: 'explicit', timeout },
     };
   }
 
