@@ -281,22 +281,6 @@ npm run dev -- config list
 - **Tool isolation**: Only tools from configured upstream servers are accessible
 - **Container hardening**: Container executor runs non-root with dropped capabilities, read-only filesystem, PID/memory/CPU limits
 
-## Prebuilt Servers
-
-The bridge comes pre-configured with popular MCP servers:
-
-- **kubernetes** -- Kubernetes cluster operations
-- **swf_gitlab** -- GitLab integration
-- **time** -- Time operations and timezone conversion
-- **memory** -- Knowledge graph memory system
-- **code-sandbox** -- Sandboxed code execution via Docker containers
-- **mcp-git** -- Git operations
-- **sequential-thinking** -- Structured reasoning
-- **atlassian_cloud** -- Atlassian Cloud (Jira/Confluence) integration (HTTP + OAuth)
-- **microsoft/markitdown** -- Document to markdown conversion
-
-Run `codemode-bridge config list` to see all available servers.
-
 ## Adding to Your MCP Client
 
 ### VS Code / GitHub Copilot
