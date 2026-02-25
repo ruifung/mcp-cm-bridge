@@ -48,6 +48,9 @@ cd mcp-cm-bridge
 npm install
 npm run build
 node dist/cli/index.js run
+
+# Or run in dev mode (builds and runs in one step)
+npm run dev
 ```
 
 ### Basic Usage
