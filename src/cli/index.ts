@@ -64,7 +64,7 @@ program
   });
 
 // Config command group
-const config = program.command("config").description("Manage bridge configuration");
+const config = program.command("config").description("Manage bridge configuration").enablePositionalOptions();
 
 config
   .command("list")
@@ -90,7 +90,8 @@ config
 
 config
   .command("add <name> [commandAndArgs...]")
-  .description("Add a new server configuration")
+  .description("Add a new server configuration (use -- before commands with flags, e.g. -- npx -y @some/pkg)")
+  .passThroughOptions()
   .requiredOption(
     "-t, --type <type>",
     "Server type (stdio or http)"
