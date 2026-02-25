@@ -30,6 +30,16 @@ npm install -g git+https://github.com/ruifung/mcp-cm-bridge.git
 codemode-bridge run
 ```
 
+#### Windows Users
+
+Global install from the git URL may fail on Windows due to the 260-character MAX_PATH limit (`TAR_ENTRY_ERROR ENOENT` during extraction). Install from the prebuilt release tarball instead:
+
+```bash
+npm install -g https://github.com/ruifung/mcp-cm-bridge/releases/download/v1.0.1/ruifung-codemode-bridge-1.0.1.tgz
+```
+
+Check the [latest release](https://github.com/ruifung/mcp-cm-bridge/releases/latest) for the most recent tarball URL. The `npx` method also works fine on Windows since it uses shorter temp paths.
+
 ### Basic Usage
 
 List configured servers:
