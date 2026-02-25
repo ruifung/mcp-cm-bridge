@@ -40,6 +40,25 @@ npm install -g https://github.com/ruifung/mcp-cm-bridge/releases/download/v1.0.1
 
 Check the [latest release](https://github.com/ruifung/mcp-cm-bridge/releases/latest) for the most recent tarball URL. The `npx` method also works fine on Windows since it uses shorter temp paths.
 
+#### GitHub Packages (npm registry)
+
+This package is published to the GitHub npm registry (not the public npm registry). To install from there, first configure npm to use GitHub Packages for the `@ruifung` scope:
+
+```bash
+echo "@ruifung:registry=https://npm.pkg.github.com" >> ~/.npmrc
+```
+
+Then install:
+
+```bash
+npm install -g @ruifung/codemode-bridge
+```
+
+> **Note:** GitHub Packages requires authentication even for public packages. You'll need a GitHub personal access token with `read:packages` scope. Add it to your `~/.npmrc`:
+> ```
+> //npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN
+> ```
+
 #### From Source
 
 ```bash
