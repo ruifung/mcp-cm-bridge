@@ -11,7 +11,7 @@
     "config"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/executor/*.mjs dist/executor/",
     "prepare": "npm run build",
     "dev": "tsx src/cli/index.ts",
     "dev:bun": "bun run src/cli/index.ts",
@@ -50,6 +50,7 @@
   "devDependencies": {
     "@types/node": "^25.3.0",
     "@vitest/ui": "^4.0.18",
+    "shx": "^0.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
