@@ -250,21 +250,29 @@ export class IsolatedVmExecutor implements Executor {
       );
 
       // Set up the tool wrapper in isolate - uses notification pattern
+      // Refactored: mutate codemode in-place instead of reassigning, so it can be
+      // made non-configurable/non-writable on globalThis.
       await context.eval(`
-        globalThis._pendingResolvers = {};
-        globalThis._toolResults = {};
-        globalThis._toolErrors = {};
-        
-        const _codemodeMethods = {};
-        for (const toolName of Object.keys(codemode)) {
-          _codemodeMethods[toolName] = (...args) => {
+        // Internal state — non-enumerable to hide from user code
+        Object.defineProperty(globalThis, '_pendingResolvers', { value: {}, writable: true, enumerable: false, configurable: true });
+        Object.defineProperty(globalThis, '_toolResults',      { value: {}, writable: true, enumerable: false, configurable: true });
+        Object.defineProperty(globalThis, '_toolErrors',       { value: {}, writable: true, enumerable: false, configurable: true });
+        Object.defineProperty(globalThis, '_hostExecuteTool',  {
+          value: globalThis._hostExecuteTool,
+          writable: false, enumerable: false, configurable: false
+        });
+
+        // Replace codemode entries in-place with async tool wrappers
+        const _toolNames = Object.keys(codemode);
+        for (const key of Object.keys(codemode)) { delete codemode[key]; }
+        for (const toolName of _toolNames) {
+          codemode[toolName] = (...args) => {
             return new Promise((resolve, reject) => {
               const callId = _hostExecuteTool(toolName, args);
               globalThis._pendingResolvers[callId] = { resolve, reject };
             });
           };
         }
-        codemode = _codemodeMethods;
       `);
 
       // Use Promise-based execution with async function
@@ -295,6 +303,46 @@ export class IsolatedVmExecutor implements Executor {
               reject: rejectCallback,
             }).copyInto({ transferIn: true })
           );
+
+          // Sandbox hardening — runs after ALL setup (including protocol), before user code
+          await context.eval(`
+            // 1. Freeze prototypes to prevent prototype pollution
+            Object.freeze(Object.prototype);
+            Object.freeze(Array.prototype);
+            Object.freeze(Function.prototype);
+
+            // 2. Block eval and Function constructor
+            Object.defineProperty(globalThis, 'eval', {
+              value: function() { throw new Error("eval is not allowed"); },
+              writable: false, enumerable: false, configurable: false
+            });
+            (function() {
+              var OrigFunction = Function;
+              function BlockedFunction() { throw new Error("Function constructor is not allowed"); }
+              BlockedFunction.prototype = OrigFunction.prototype;
+              globalThis.Function = BlockedFunction;
+            })();
+
+            // 3. Make codemode non-configurable & non-writable
+            Object.defineProperty(globalThis, 'codemode', {
+              value: globalThis.codemode,
+              writable: false,
+              configurable: false,
+              enumerable: true,
+            });
+
+            // 4. Make protocol & internal state non-enumerable
+            Object.defineProperty(globalThis, 'protocol', {
+              value: globalThis.protocol,
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+            // _hostExecuteTool already non-configurable from tool setup
+
+            // 5. Seal globalThis to prevent adding/removing properties
+            Object.seal(globalThis);
+          `);
 
           // Wrap code so it returns a Promise we can .then()
           const wrappedCode = wrapCode(code, { alwaysAsync: true });

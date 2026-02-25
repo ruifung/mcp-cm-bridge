@@ -80,6 +80,33 @@ function createCodemodeProxy() {
 
 globalThis.codemode = createCodemodeProxy();
 
+// ── Sandbox hardening ───────────────────────────────────────────────
+// Save reference to eval before overriding — the worker uses indirect eval
+// to execute user code in run().
+const _savedEval = eval;
+
+// 1. Block eval from user code
+Object.defineProperty(globalThis, 'eval', {
+  value: function() { throw new Error('eval is not allowed'); },
+  writable: false, enumerable: false, configurable: false,
+});
+
+// 2. Block Function constructor (equivalent to eval)
+{
+  const OrigFunction = Function;
+  function BlockedFunction() { throw new Error('Function constructor is not allowed'); }
+  BlockedFunction.prototype = OrigFunction.prototype;
+  globalThis.Function = BlockedFunction;
+}
+
+// 3. Make codemode non-configurable & non-writable
+Object.defineProperty(globalThis, 'codemode', {
+  value: globalThis.codemode,
+  writable: false,
+  configurable: false,
+  enumerable: true,
+});
+
 // ── Handle messages from parent (tool results) ─────────────────────
 
 parentPort.on('message', (msg) => {
@@ -102,8 +129,7 @@ parentPort.on('message', (msg) => {
 
 async function run() {
   try {
-    const indirectEval = eval;
-    const result = await indirectEval(code);
+    const result = await _savedEval(code);
 
     parentPort.postMessage({
       type: 'result',

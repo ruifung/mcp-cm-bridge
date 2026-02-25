@@ -70,6 +70,30 @@ export class VM2Executor implements Executor {
         },
       });
 
+      // Sandbox hardening — runs before user code
+      vm.run(`
+        // 1. Freeze prototypes to prevent prototype pollution
+        Object.freeze(Object.prototype);
+        Object.freeze(Array.prototype);
+        Object.freeze(Function.prototype);
+
+        // 2. Block Function constructor (equivalent to eval)
+        (function() {
+          var OrigFunction = Function;
+          function BlockedFunction() { throw new Error("Function constructor is not allowed"); }
+          BlockedFunction.prototype = OrigFunction.prototype;
+          globalThis.Function = BlockedFunction;
+        })();
+
+        // 3. Make codemode non-configurable & non-writable
+        Object.defineProperty(globalThis, 'codemode', {
+          value: globalThis.codemode,
+          writable: false,
+          configurable: false,
+          enumerable: true,
+        });
+      `, "codemode-hardening.js");
+
       // vm.run() returns a Promise if the code returns a Promise
       const rawResult = vm.run(wrappedCode, "codemode-execution.js");
       

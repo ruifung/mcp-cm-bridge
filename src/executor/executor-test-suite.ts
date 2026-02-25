@@ -446,34 +446,24 @@ export function createExecutorTestSuite(
         }
       });
 
-      testOrSkip('should isolate prototype pollution to the current execution', async () => {
-        // NOTE: Prototype pollution IS possible within a single execution,
-        // but it is NOT a security risk because:
-        // 1. Each execution gets a fresh sandbox with clean prototypes
-        // 2. Pollution only affects that specific execution's globals
-        // 3. Host code is protected by serialization boundaries (JSON.stringify)
-        // 4. Next execution runs in a completely new sandbox
-        
-        // Test 1: Pollution works within execution (expected)
-        const result1 = await executor.execute(
+      testOrSkip('should block prototype pollution', async () => {
+        // Prototypes are frozen — Object.assign(Object.prototype, ...) must
+        // either throw or silently fail, and the pollution must not take effect.
+        const result = await executor.execute(
           `
-          Object.assign(Object.prototype, { polluted: true });
+          try {
+            Object.assign(Object.prototype, { polluted: true });
+          } catch (e) {
+            // Throws in strict mode — expected
+          }
           const obj = {};
           return obj.polluted;
           `,
           {}
         );
-        expect(result1.result).toBe(true); // Pollution works within this execution
-        
-        // Test 2: Next execution has clean prototypes (this proves isolation)
-        const result2 = await executor.execute(
-          `
-          const obj = {};
-          return obj.polluted;
-          `,
-          {}
-        );
-        expect(result2.result).toBeUndefined(); // Fresh sandbox, no pollution
+        // Pollution must not have taken effect
+        expect(result.result).toBeUndefined();
+        expect(result.error).toBeUndefined();
       });
     });
 
