@@ -40,6 +40,16 @@ npm install -g https://github.com/ruifung/mcp-cm-bridge/releases/download/v1.0.1
 
 Check the [latest release](https://github.com/ruifung/mcp-cm-bridge/releases/latest) for the most recent tarball URL. The `npx` method also works fine on Windows since it uses shorter temp paths.
 
+#### From Source
+
+```bash
+git clone https://github.com/ruifung/mcp-cm-bridge.git
+cd mcp-cm-bridge
+npm install
+npm run build
+node dist/cli/index.js run
+```
+
 ### Basic Usage
 
 List configured servers:
