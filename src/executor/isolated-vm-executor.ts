@@ -1,4 +1,5 @@
 import type { Executor, ExecuteResult } from '@cloudflare/codemode';
+// @ts-ignore - isolated-vm is an optional dependency; this file is only loaded via dynamic import() when available
 import ivm from 'isolated-vm';
 const { Isolate, Context } = ivm;
 type IsolateType = InstanceType<typeof ivm.Isolate>;

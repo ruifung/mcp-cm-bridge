@@ -155,9 +155,55 @@ export class VM2Executor implements Executor {
 }
 
 /**
- * Factory function to create an Executor instance
- * This is what the codemode SDK expects
+ * Check if isolated-vm is available (optional dependency)
  */
-export function createExecutor(timeout = 30000): Executor {
+let isolatedVmAvailable: boolean | null = null;
+
+async function isIsolatedVmAvailable(): Promise<boolean> {
+  if (isolatedVmAvailable !== null) return isolatedVmAvailable;
+  try {
+    // @ts-ignore - isolated-vm is an optional dependency
+    await import('isolated-vm');
+    isolatedVmAvailable = true;
+  } catch {
+    isolatedVmAvailable = false;
+  }
+  return isolatedVmAvailable;
+}
+
+/**
+ * Factory function to create an Executor instance.
+ *
+ * Selection logic:
+ *   1. EXECUTOR_TYPE=vm2         → always use vm2
+ *   2. EXECUTOR_TYPE=isolated-vm → always use isolated-vm (throws if unavailable)
+ *   3. EXECUTOR_TYPE unset       → prefer isolated-vm, fall back to vm2
+ */
+export async function createExecutor(timeout = 30000): Promise<Executor> {
+  const requested = process.env.EXECUTOR_TYPE?.toLowerCase();
+
+  if (requested === 'vm2') {
+    return new VM2Executor(timeout);
+  }
+
+  if (requested === 'isolated-vm') {
+    const available = await isIsolatedVmAvailable();
+    if (!available) {
+      throw new Error(
+        'EXECUTOR_TYPE=isolated-vm but the "isolated-vm" package is not installed. ' +
+        'Install it with: npm install isolated-vm'
+      );
+    }
+    const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
+    return createIsolatedVmExecutor({ timeout });
+  }
+
+  // Default: prefer isolated-vm, fall back to vm2
+  const available = await isIsolatedVmAvailable();
+  if (available) {
+    const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
+    return createIsolatedVmExecutor({ timeout });
+  }
+
   return new VM2Executor(timeout);
 }

@@ -337,7 +337,7 @@ export async function startCodeModeBridgeServer(
   }
 
   // Create the executor using the codemode SDK pattern
-  const executor = createExecutor(30000); // 30 second timeout
+  const executor = await createExecutor(30000); // 30 second timeout
 
   // Create the codemode tool using the codemode SDK
   // Pass ToolDescriptor format (with Zod schemas and execute functions)
