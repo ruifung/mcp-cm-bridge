@@ -1,5 +1,7 @@
 # Code Mode Bridge
 
+[![npm](https://img.shields.io/npm/v/@ruifung/codemode-bridge)](https://www.npmjs.com/package/@ruifung/codemode-bridge)
+
 An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution.
 
 ## Features
@@ -19,51 +21,14 @@ An MCP (Model Context Protocol) server that connects to upstream MCP servers and
 
 ### Installation
 
-Install directly from GitHub:
-
 ```bash
 # Run without installing
 npx @ruifung/codemode-bridge
 
 # Or install globally
 npm install -g @ruifung/codemode-bridge
-codemode-bridge run
+codemode-bridge
 ```
-
-Alternatively, install from the git URL:
-
-```bash
-npx git+https://github.com/ruifung/mcp-cm-bridge.git
-```
-
-#### Windows Users
-
-Global install from the git URL may fail on Windows due to the 260-character MAX_PATH limit (`TAR_ENTRY_ERROR ENOENT` during extraction). Install from the prebuilt release tarball instead:
-
-```bash
-npm install -g https://github.com/ruifung/mcp-cm-bridge/releases/download/v1.0.1/ruifung-codemode-bridge-1.0.1.tgz
-```
-
-Check the [latest release](https://github.com/ruifung/mcp-cm-bridge/releases/latest) for the most recent tarball URL. The `npx` method also works fine on Windows since it uses shorter temp paths.
-
-#### GitHub Packages (npm registry)
-
-This package is published to the GitHub npm registry (not the public npm registry). To install from there, first configure npm to use GitHub Packages for the `@ruifung` scope:
-
-```bash
-echo "@ruifung:registry=https://npm.pkg.github.com" >> ~/.npmrc
-```
-
-Then install:
-
-```bash
-npm install -g @ruifung/codemode-bridge
-```
-
-> **Note:** GitHub Packages requires authentication even for public packages. You'll need a GitHub personal access token with `read:packages` scope. Add it to your `~/.npmrc`:
-> ```
-> //npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN
-> ```
 
 #### From Source
 
