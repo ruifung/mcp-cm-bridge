@@ -48,9 +48,9 @@ jobs:
       - name: Run Tests
         run: |
           if [ "${{ matrix.runtime }}" = "node" ]; then
-            npm test run
+            npm test run -- --reporter=verbose
           elif [ "${{ matrix.runtime }}" = "deno" ]; then
-            deno run -A npm:vitest run
+            deno run -A npm:vitest run --reporter=verbose
           elif [ "${{ matrix.runtime }}" = "bun" ]; then
-            bun test
+            bun test --verbose
           fi
