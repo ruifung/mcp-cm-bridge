@@ -1,65 +1,20 @@
 /**
  * Executor Implementation for Codemode SDK
  * Implements the @cloudflare/codemode Executor interface using vm2 sandbox
- *
- * **DEPRECATED — SECURITY RISK**
- * vm2 is unmaintained and has 6 unfixable CVSS 10.0 sandbox escape CVEs.
- * This executor exists only as a last-resort fallback when neither
- * isolated-vm nor a container runtime is available.
- * It must NEVER be used in production environments.
  */
 
 import { VM } from "vm2";
 import type { Executor, ExecuteResult } from "@cloudflare/codemode";
 import { wrapCode } from "./wrap-code.js";
-import { logWarn } from "../utils/logger.js";
-import chalk from "chalk";
-
-// ── Security Warning ────────────────────────────────────────────────
-
-const VM2_WARNING_BANNER = [
-  '',
-  chalk.bgRed.white.bold('╔══════════════════════════════════════════════════════════════════════════════╗'),
-  chalk.bgRed.white.bold('║  ⚠⚠⚠  SECURITY WARNING: VM2 EXECUTOR IS ACTIVE  ⚠⚠⚠                       ║'),
-  chalk.bgRed.white.bold('╠══════════════════════════════════════════════════════════════════════════════╣'),
-  chalk.bgRed.white.bold('║                                                                            ║'),
-  chalk.bgRed.white.bold('║  vm2 is DEPRECATED and has 6 unfixable sandbox escape vulnerabilities       ║'),
-  chalk.bgRed.white.bold('║  rated CVSS 10.0 (CRITICAL). Arbitrary host code execution is possible.     ║'),
-  chalk.bgRed.white.bold('║                                                                            ║'),
-  chalk.bgRed.white.bold('║  CVEs: CVE-2023-37466, CVE-2023-37903, CVE-2023-32314,                     ║'),
-  chalk.bgRed.white.bold('║        CVE-2023-32313, CVE-2023-29199, CVE-2023-29017                      ║'),
-  chalk.bgRed.white.bold('║                                                                            ║'),
-  chalk.bgRed.white.bold('║  DO NOT USE IN PRODUCTION. The sandbox provides NO real security.           ║'),
-  chalk.bgRed.white.bold('║  Use isolated-vm or container executors instead.                            ║'),
-  chalk.bgRed.white.bold('║                                                                            ║'),
-  chalk.bgRed.white.bold('╚══════════════════════════════════════════════════════════════════════════════╝'),
-  '',
-].join('\n');
-
-let _vm2WarningShown = false;
-
-function emitVM2SecurityWarning(): void {
-  if (_vm2WarningShown) return;
-  _vm2WarningShown = true;
-  logWarn(VM2_WARNING_BANNER, { component: 'VM2Executor' });
-}
-
-// ── VM2Executor ─────────────────────────────────────────────────────
 
 /**
  * VM2-based Executor implementation
- *
- * **DEPRECATED**: vm2 has multiple unfixable CVSS 10.0 sandbox escape
- * vulnerabilities. This executor exists only as a last-resort fallback
- * when neither isolated-vm nor a container runtime is available.
- * It should NEVER be used in production environments.
  */
 export class VM2Executor implements Executor {
   private timeout: number;
 
   constructor(timeout = 30000) {
     this.timeout = timeout;
-    emitVM2SecurityWarning();
   }
 
   async execute(
@@ -188,9 +143,6 @@ export class VM2Executor implements Executor {
 
 /**
  * Factory function to create a VM2 executor instance.
- *
- * **DEPRECATED**: vm2 has unfixable CVSS 10.0 sandbox escape CVEs.
- * Prefer isolated-vm or container executors.
  */
 export function createVM2Executor(options?: { timeout?: number }): Executor {
   return new VM2Executor(options?.timeout);
