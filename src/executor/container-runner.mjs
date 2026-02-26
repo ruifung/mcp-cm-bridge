@@ -29,6 +29,8 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+process.stderr.write('[container-runner] Starting...\n');
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const WORKER_PATH = join(__dirname, 'container-worker.mjs');
@@ -167,6 +169,7 @@ const rl = createInterface({ input: process.stdin, terminal: false });
 
 rl.on('line', (line) => {
   if (!line.trim()) return;
+  process.stderr.write('[container-runner] Received message: ' + line.substring(0, 100) + '\n');
   try {
     const msg = JSON.parse(line);
     handleMessage(msg);
@@ -185,4 +188,6 @@ rl.on('close', () => {
 
 // ── Signal readiness ────────────────────────────────────────────────
 
+process.stderr.write('[container-runner] Sending ready signal...\n');
 send({ type: 'ready' });
+process.stderr.write('[container-runner] Ready signal sent\n');

@@ -206,7 +206,9 @@ export class ContainerCliExecutor implements Executor {
     const scripts = getScriptPaths();
 
     // Pull the image first (no-op if already present)
+    logDebug('[Executor:CLI] Checking image...', { component: 'Executor' });
     await this.pullImage();
+    logDebug('[Executor:CLI] Image ready', { component: 'Executor' });
 
     // Start a long-lived container with the runner + worker scripts
     const suffix = randomBytes(4).toString('hex');
@@ -231,9 +233,11 @@ export class ContainerCliExecutor implements Executor {
       ...this.containerCommand, '/app/container-runner.mjs',
     ];
 
+    logDebug('[Executor:CLI] Creating container...', { component: 'Executor' });
     this.process = spawn(this.runtime, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    logDebug('[Executor:CLI] Container process spawned', { component: 'Executor' });
 
     // Forward stderr for debugging
     this.process.stderr?.on('data', (data: Buffer) => {
@@ -241,6 +245,7 @@ export class ContainerCliExecutor implements Executor {
     });
 
     this.process.on('exit', (code) => {
+      logDebug(`[Executor:CLI] Container process exited with code ${code}`, { component: 'Executor' });
       this.ready = false;
       // Reject any pending execution
       if (this.pendingExecution) {
@@ -261,6 +266,7 @@ export class ContainerCliExecutor implements Executor {
     this.readline.on('line', (line) => this.handleMessage(line));
 
     // Wait for the "ready" message (generous timeout to allow image pull)
+    logDebug('[Executor:CLI] Waiting for ready signal...', { component: 'Executor' });
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Container failed to become ready within 120s'));
@@ -288,6 +294,8 @@ export class ContainerCliExecutor implements Executor {
    */
   private handleMessage(line: string): void {
     if (!line.trim()) return;
+
+    logDebug(`[Executor:CLI] Container stdout: ${line.substring(0, 200)}`, { component: 'Executor' });
 
     let msg: ContainerMessage;
     try {

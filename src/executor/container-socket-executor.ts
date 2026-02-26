@@ -191,7 +191,9 @@ export class ContainerSocketExecutor implements Executor {
 
   private async _init(): Promise<void> {
     const scripts = getScriptPaths();
+    logDebug('[Executor:Socket] Checking image...', { component: 'Executor' });
     await this.pullImage();
+    logDebug('[Executor:Socket] Image ready', { component: 'Executor' });
 
     const suffix = randomBytes(4).toString('hex');
     const containerName = `codemode-executor-container-${suffix}`;
@@ -200,6 +202,7 @@ export class ContainerSocketExecutor implements Executor {
     this._proxyModem();
 
     try {
+      logDebug('[Executor:Socket] Creating container...', { component: 'Executor' });
       // Create the container with the runner as the primary process
       this.container = await this.docker.createContainer({
         name: containerName,
@@ -223,8 +226,10 @@ export class ContainerSocketExecutor implements Executor {
         },
         WorkingDir: '/app'
       });
+      logDebug('[Executor:Socket] Container created', { component: 'Executor' });
 
       // Attach BEFORE starting to capture the first messages
+      logDebug('[Executor:Socket] Attaching stream...', { component: 'Executor' });
       this.execStream = await this.container.attach({
         stream: true,
         stdin: true,
@@ -232,8 +237,11 @@ export class ContainerSocketExecutor implements Executor {
         stderr: true,
         hijack: true
       });
+      logDebug('[Executor:Socket] Stream attached', { component: 'Executor' });
 
+      logDebug('[Executor:Socket] Starting container...', { component: 'Executor' });
       await this.container.start();
+      logDebug('[Executor:Socket] Container started', { component: 'Executor' });
     } catch (err) {
       logError(`Failed to create or start container: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
       throw err;
@@ -256,6 +264,7 @@ export class ContainerSocketExecutor implements Executor {
 
     this.readline.on('line', (line) => this.handleMessage(line));
 
+    logDebug('[Executor:Socket] Waiting for ready signal...', { component: 'Executor' });
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Container failed to become ready within 120s'));
@@ -272,6 +281,8 @@ export class ContainerSocketExecutor implements Executor {
 
   private handleMessage(line: string): void {
     if (!line.trim()) return;
+
+    logDebug(`[Executor:Socket] Container stdout: ${line.substring(0, 200)}`, { component: 'Executor' });
 
     let msg: ContainerMessage;
     try {
