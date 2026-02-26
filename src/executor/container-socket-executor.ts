@@ -18,6 +18,7 @@ import { isBun, isDeno } from '../utils/env.js';
 import { logDebug, logInfo, logError } from '../utils/logger.js';
 
 const MAX_STDERR_LINES = 100;
+const HEARTBEAT_INTERVAL_MS = 5_000; // 5 seconds
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ type HostMessage =
   | { type: 'execute'; id: string; code: string }
   | { type: 'tool-result'; id: string; result: unknown }
   | { type: 'tool-error'; id: string; error: string }
+  | { type: 'heartbeat' }
   | { type: 'shutdown' };
 
 /** Messages sent from container → host */
@@ -86,6 +88,7 @@ export class ContainerSocketExecutor implements Executor {
   private readline: Interface | null = null;
   private ready = false;
   private stderrLines: string[] = [];
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
   private readyResolve: (() => void) | null = null;
   private readyReject: ((err: Error) => void) | null = null;
@@ -215,6 +218,10 @@ export class ContainerSocketExecutor implements Executor {
         Cmd: [...this.containerCommand, '/app/container-runner.mjs'],
         User: this.containerUser,
         OpenStdin: true,
+        Labels: {
+          'codemode.host-pid': String(process.pid),
+          'codemode.created-at': new Date().toISOString(),
+        },
         HostConfig: {
           AutoRemove: true,
           NetworkMode: 'none',
@@ -334,6 +341,15 @@ export class ContainerSocketExecutor implements Executor {
         this.pendingExecution = null;
       }
     }).catch(() => { /* container already gone / disposed — ignore */ });
+
+    // Start heartbeat — periodically send a ping so the container can detect host crashes
+    this.heartbeatInterval = setInterval(() => {
+      try {
+        this.send({ type: 'heartbeat' });
+      } catch {
+        // stream broken — will be caught by exit watcher
+      }
+    }, HEARTBEAT_INTERVAL_MS);
   }
 
   private handleMessage(line: string): void {
@@ -482,6 +498,11 @@ export class ContainerSocketExecutor implements Executor {
       clearTimeout(this.pendingExecution.timeoutHandle);
       this.pendingExecution.reject(new Error('Executor disposed'));
       this.pendingExecution = null;
+    }
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
 
     if (this.execStream) {

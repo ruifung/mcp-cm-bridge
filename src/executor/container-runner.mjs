@@ -29,6 +29,10 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// ── Constants ───────────────────────────────────────────────────────
+
+const HEARTBEAT_TIMEOUT_MS = 15_000; // 3x the 5s host interval
+
 // ── Top-level error handlers ────────────────────────────────────────
 // Must be registered before anything else so that startup failures
 // (e.g., missing module, syntax error) are reported to the host rather
@@ -70,6 +74,11 @@ const WORKER_PATH = join(__dirname, 'container-worker.mjs');
 let activeWorker = null;
 /** @type {string | null} */
 let activeExecutionId = null;
+
+// ── Heartbeat watchdog state ────────────────────────────────────────
+
+let lastHeartbeat = Date.now();
+let heartbeatWatchdog = null;
 
 // ── Protocol helpers ────────────────────────────────────────────────
 
@@ -162,6 +171,10 @@ function cleanup() {
 
 function handleMessage(msg) {
   switch (msg.type) {
+    case 'heartbeat':
+      lastHeartbeat = Date.now();
+      return;
+
     case 'execute':
       executeCode(msg.id, msg.code);
       break;
@@ -180,6 +193,10 @@ function handleMessage(msg) {
 
     case 'shutdown':
       // Terminate any active worker, then exit
+      if (heartbeatWatchdog) {
+        clearInterval(heartbeatWatchdog);
+        heartbeatWatchdog = null;
+      }
       if (activeWorker) {
         activeWorker.terminate();
         cleanup();
@@ -208,6 +225,10 @@ rl.on('line', (line) => {
 });
 
 rl.on('close', () => {
+  if (heartbeatWatchdog) {
+    clearInterval(heartbeatWatchdog);
+    heartbeatWatchdog = null;
+  }
   if (activeWorker) {
     activeWorker.terminate();
     cleanup();
@@ -220,3 +241,16 @@ rl.on('close', () => {
 process.stderr.write('[container-runner] Sending ready signal...\n');
 send({ type: 'ready' });
 process.stderr.write('[container-runner] Ready signal sent\n');
+
+// Start heartbeat watchdog — if host stops sending heartbeats, self-terminate
+heartbeatWatchdog = setInterval(() => {
+  const elapsed = Date.now() - lastHeartbeat;
+  if (elapsed > HEARTBEAT_TIMEOUT_MS) {
+    process.stderr.write(`[container-runner] No heartbeat from host for ${elapsed}ms, self-terminating\n`);
+    if (activeWorker) {
+      try { activeWorker.terminate(); } catch {}
+    }
+    clearInterval(heartbeatWatchdog);
+    process.exit(1);
+  }
+}, 5_000); // check every 5 seconds
