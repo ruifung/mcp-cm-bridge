@@ -14,7 +14,9 @@ import { dirname, join } from 'node:path';
 import type { Executor, ExecuteResult } from '@cloudflare/codemode';
 import { wrapCode } from './wrap-code.js';
 import { isBun, isDeno } from '../utils/env.js';
-import { logDebug } from '../utils/logger.js';
+import { logDebug, logError } from '../utils/logger.js';
+
+const MAX_STDERR_LINES = 100;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -47,6 +49,7 @@ type ContainerMessage =
   | { type: 'tool-call'; id: string; name: string; args: unknown }
   | { type: 'result'; id: string; result: unknown; logs?: string[] }
   | { type: 'error'; id: string; error: string; logs?: string[] }
+  | { type: 'error'; error: { message: string; stack?: string; name?: string } }
   | { type: 'ready' };
 
 // ── Runtime detection ───────────────────────────────────────────────
@@ -103,9 +106,11 @@ export class ContainerCliExecutor implements Executor {
   private process: ChildProcess | null = null;
   private readline: Interface | null = null;
   private ready = false;
+  private stderrLines: string[] = [];
 
   /** Resolved when the container sends { type: 'ready' } */
   private readyResolve: (() => void) | null = null;
+  private readyReject: ((err: Error) => void) | null = null;
 
   /** Pending execution — only one at a time */
   private pendingExecution: {
@@ -239,9 +244,19 @@ export class ContainerCliExecutor implements Executor {
     });
     logDebug('[Executor:CLI] Container process spawned', { component: 'Executor' });
 
-    // Forward stderr for debugging
+    // Forward stderr for debugging and buffer for diagnostics
     this.process.stderr?.on('data', (data: Buffer) => {
-      process.stderr.write(`[container-cli] ${data.toString()}`);
+      const text = data.toString();
+      process.stderr.write(`[container-cli] ${text}`);
+      for (const line of text.split('\n')) {
+        const trimmed = line.trimEnd();
+        if (trimmed) {
+          this.stderrLines.push(trimmed);
+          if (this.stderrLines.length > MAX_STDERR_LINES) {
+            this.stderrLines.shift();
+          }
+        }
+      }
     });
 
     this.process.on('exit', (code) => {
@@ -249,9 +264,12 @@ export class ContainerCliExecutor implements Executor {
       this.ready = false;
       // Reject any pending execution
       if (this.pendingExecution) {
+        const stderrSummary = this.stderrLines.length
+          ? `\nStderr:\n${this.stderrLines.join('\n')}`
+          : '';
         clearTimeout(this.pendingExecution.timeoutHandle);
         this.pendingExecution.reject(
-          new Error(`Container exited unexpectedly with code ${code}`)
+          new Error(`Container exited unexpectedly with code ${code}.${stderrSummary}`)
         );
         this.pendingExecution = null;
       }
@@ -272,19 +290,41 @@ export class ContainerCliExecutor implements Executor {
         reject(new Error('Container failed to become ready within 120s'));
       }, 120000);
 
-      // Store resolve so handleMessage can call it when ready arrives
-      this.readyResolve = () => {
+      const cleanup = (err?: Error) => {
         clearTimeout(timeout);
-        this.ready = true;
         this.readyResolve = null;
-        resolve();
+        this.readyReject = null;
+        // Remove the close listener so it doesn't fire again after we're done
+        this.process?.removeListener('close', onClose);
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
       };
 
-      // Handle startup failure
+      // Store resolve so handleMessage can call it when ready arrives
+      this.readyResolve = () => {
+        this.ready = true;
+        cleanup();
+      };
+
+      this.readyReject = (err: Error) => {
+        cleanup(err);
+      };
+
+      // Detect premature exit before the ready signal arrives
+      const onClose = (code: number | null) => {
+        const stderrSummary = this.stderrLines.length
+          ? `\nStderr:\n${this.stderrLines.join('\n')}`
+          : '';
+        cleanup(new Error(`Container exited prematurely with code ${code}.${stderrSummary}`));
+      };
+      this.process!.once('close', onClose);
+
+      // Handle spawn failure
       this.process!.on('error', (err) => {
-        clearTimeout(timeout);
-        this.readyResolve = null;
-        reject(new Error(`Failed to start container: ${err.message}`));
+        cleanup(new Error(`Failed to start container: ${err.message}`));
       });
     });
   }
@@ -301,7 +341,14 @@ export class ContainerCliExecutor implements Executor {
     try {
       msg = JSON.parse(line);
     } catch {
-      process.stderr.write(`[container-cli-executor] bad JSON from container: ${line}\n`);
+      logError('Container sent non-JSON output (likely crashed)', { output: line });
+      if (this.readyReject) {
+        this.readyReject(new Error('Container sent non-JSON output: ' + line));
+      } else if (this.pendingExecution) {
+        clearTimeout(this.pendingExecution.timeoutHandle);
+        this.pendingExecution.reject(new Error('Container sent non-JSON output: ' + line));
+        this.pendingExecution = null;
+      }
       return;
     }
 
@@ -322,14 +369,30 @@ export class ContainerCliExecutor implements Executor {
         break;
 
       case 'error':
-        if (this.pendingExecution && this.pendingExecution.id === msg.id) {
-          clearTimeout(this.pendingExecution.timeoutHandle);
-          this.pendingExecution.resolve({
-            result: undefined,
-            error: msg.error,
-            logs: msg.logs,
-          });
-          this.pendingExecution = null;
+        if (typeof (msg as any).id === 'string') {
+          // Execution-scoped error: { type, id, error, logs }
+          const execErr = msg as { type: 'error'; id: string; error: string; logs?: string[] };
+          if (this.pendingExecution && this.pendingExecution.id === execErr.id) {
+            clearTimeout(this.pendingExecution.timeoutHandle);
+            this.pendingExecution.resolve({
+              result: undefined,
+              error: execErr.error,
+              logs: execErr.logs,
+            });
+            this.pendingExecution = null;
+          }
+        } else {
+          // Top-level fatal error from the runner: { type, error: { message, stack, name } }
+          const fatalErr = msg as { type: 'error'; error: { message: string; stack?: string; name?: string } };
+          logError(
+            `[Executor:CLI] Container runner fatal error: ${fatalErr.error.message}\n${fatalErr.error.stack ?? ''}`,
+            { component: 'Executor' }
+          );
+          if (this.readyReject) {
+            this.readyReject(new Error(`Container runner fatal error: ${fatalErr.error.message}`));
+            this.readyResolve = null;
+            this.readyReject = null;
+          }
         }
         break;
 

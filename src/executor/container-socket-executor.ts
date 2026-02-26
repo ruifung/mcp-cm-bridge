@@ -17,6 +17,8 @@ import { wrapCode } from './wrap-code.js';
 import { isBun, isDeno } from '../utils/env.js';
 import { logDebug, logInfo, logError } from '../utils/logger.js';
 
+const MAX_STDERR_LINES = 100;
+
 // ── Types ───────────────────────────────────────────────────────────
 
 export interface ContainerSocketExecutorOptions {
@@ -48,6 +50,7 @@ type ContainerMessage =
   | { type: 'tool-call'; id: string; name: string; args: unknown }
   | { type: 'result'; id: string; result: unknown; logs?: string[] }
   | { type: 'error'; id: string; error: string; logs?: string[] }
+  | { type: 'error'; error: { message: string; stack?: string; name?: string } }
   | { type: 'ready' };
 
 // ── Resolve runner script path ──────────────────────────────────────
@@ -82,8 +85,10 @@ export class ContainerSocketExecutor implements Executor {
   private execStream: any = null;
   private readline: Interface | null = null;
   private ready = false;
+  private stderrLines: string[] = [];
 
   private readyResolve: (() => void) | null = null;
+  private readyReject: ((err: Error) => void) | null = null;
 
   private pendingExecution: {
     id: string;
@@ -230,13 +235,17 @@ export class ContainerSocketExecutor implements Executor {
 
       // Attach BEFORE starting to capture the first messages
       logDebug('[Executor:Socket] Attaching stream...', { component: 'Executor' });
-      this.execStream = await this.container.attach({
+      const attachPromise = this.container.attach({
         stream: true,
         stdin: true,
         stdout: true,
         stderr: true,
         hijack: true
       });
+      const attachTimeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Container attach timed out after 10s')), 10000)
+      );
+      this.execStream = await Promise.race([attachPromise, attachTimeoutPromise]);
       logDebug('[Executor:Socket] Stream attached', { component: 'Executor' });
 
       logDebug('[Executor:Socket] Starting container...', { component: 'Executor' });
@@ -254,7 +263,18 @@ export class ContainerSocketExecutor implements Executor {
     this.docker.modem.demuxStream(this.execStream, stdout, stderr);
 
     stderr.on('data', (chunk) => {
-      process.stderr.write(`[container-executor] ${chunk.toString()}`);
+      const text = chunk.toString();
+      process.stderr.write(`[container-executor] ${text}`);
+      // Buffer stderr lines for diagnostics (e.g. premature exit error messages)
+      for (const line of text.split('\n')) {
+        const trimmed = line.trimEnd();
+        if (trimmed) {
+          this.stderrLines.push(trimmed);
+          if (this.stderrLines.length > MAX_STDERR_LINES) {
+            this.stderrLines.shift();
+          }
+        }
+      }
     });
 
     this.readline = createInterface({
@@ -265,7 +285,7 @@ export class ContainerSocketExecutor implements Executor {
     this.readline.on('line', (line) => this.handleMessage(line));
 
     logDebug('[Executor:Socket] Waiting for ready signal...', { component: 'Executor' });
-    await new Promise<void>((resolve, reject) => {
+    const readyPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Container failed to become ready within 120s'));
       }, 120000);
@@ -274,9 +294,46 @@ export class ContainerSocketExecutor implements Executor {
         clearTimeout(timeout);
         this.ready = true;
         this.readyResolve = null;
+        this.readyReject = null;
         resolve();
       };
+
+      this.readyReject = (err: Error) => {
+        clearTimeout(timeout);
+        this.readyResolve = null;
+        this.readyReject = null;
+        reject(err);
+      };
     });
+
+    // Race ready signal against container exiting prematurely
+    const exitPromise = this.container!.wait().then((result: { StatusCode: number }) => {
+      const exitCode = result.StatusCode;
+      const stderrSummary = this.stderrLines.length
+        ? `\nStderr:\n${this.stderrLines.join('\n')}`
+        : '';
+      throw new Error(`Container exited prematurely with code ${exitCode}.${stderrSummary}`);
+    });
+
+    await Promise.race([readyPromise, exitPromise]);
+
+    // After init succeeds, keep watching for unexpected container exits during execution.
+    // We re-use container.wait() — it still resolves because the container is still running at
+    // this point and Dockerode allows multiple waiters.
+    this.container!.wait().then((result: { StatusCode: number }) => {
+      this.ready = false;
+      if (this.pendingExecution) {
+        const exitCode = result.StatusCode;
+        const stderrSummary = this.stderrLines.length
+          ? `\nStderr:\n${this.stderrLines.join('\n')}`
+          : '';
+        clearTimeout(this.pendingExecution.timeoutHandle);
+        this.pendingExecution.reject(
+          new Error(`Container exited unexpectedly with code ${exitCode}.${stderrSummary}`)
+        );
+        this.pendingExecution = null;
+      }
+    }).catch(() => { /* container already gone / disposed — ignore */ });
   }
 
   private handleMessage(line: string): void {
@@ -288,7 +345,14 @@ export class ContainerSocketExecutor implements Executor {
     try {
       msg = JSON.parse(line);
     } catch {
-      logDebug(`[ContainerExecutor] bad JSON: ${line}`, { component: 'Executor' });
+      logError('Container sent non-JSON output (likely crashed)', { output: line });
+      if (this.readyReject) {
+        this.readyReject(new Error('Container sent non-JSON output: ' + line));
+      } else if (this.pendingExecution) {
+        clearTimeout(this.pendingExecution.timeoutHandle);
+        this.pendingExecution.reject(new Error('Container sent non-JSON output: ' + line));
+        this.pendingExecution = null;
+      }
       return;
     }
 
@@ -309,14 +373,30 @@ export class ContainerSocketExecutor implements Executor {
         break;
 
       case 'error':
-        if (this.pendingExecution && this.pendingExecution.id === msg.id) {
-          clearTimeout(this.pendingExecution.timeoutHandle);
-          this.pendingExecution.resolve({
-            result: undefined,
-            error: msg.error,
-            logs: msg.logs,
-          });
-          this.pendingExecution = null;
+        if (typeof (msg as any).id === 'string') {
+          // Execution-scoped error: { type, id, error, logs }
+          const execErr = msg as { type: 'error'; id: string; error: string; logs?: string[] };
+          if (this.pendingExecution && this.pendingExecution.id === execErr.id) {
+            clearTimeout(this.pendingExecution.timeoutHandle);
+            this.pendingExecution.resolve({
+              result: undefined,
+              error: execErr.error,
+              logs: execErr.logs,
+            });
+            this.pendingExecution = null;
+          }
+        } else {
+          // Top-level fatal error from the runner: { type, error: { message, stack, name } }
+          const fatalErr = msg as { type: 'error'; error: { message: string; stack?: string; name?: string } };
+          logError(
+            `[Executor:Socket] Container runner fatal error: ${fatalErr.error.message}\n${fatalErr.error.stack ?? ''}`,
+            { component: 'Executor' }
+          );
+          if (this.readyReject) {
+            this.readyReject(new Error(`Container runner fatal error: ${fatalErr.error.message}`));
+            this.readyResolve = null;
+            this.readyReject = null;
+          }
         }
         break;
 

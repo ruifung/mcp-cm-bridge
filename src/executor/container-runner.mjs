@@ -29,6 +29,35 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// ── Top-level error handlers ────────────────────────────────────────
+// Must be registered before anything else so that startup failures
+// (e.g., missing module, syntax error) are reported to the host rather
+// than silently hanging the ready-signal wait.
+
+function reportFatalError(err) {
+  const payload = JSON.stringify({
+    type: 'error',
+    error: {
+      message: err?.message ?? String(err),
+      stack: err?.stack ?? '',
+      name: err?.name ?? 'Error',
+    },
+  });
+  try {
+    process.stdout.write(payload + '\n');
+  } catch { /* stdout may be gone — nothing we can do */ }
+  process.stderr.write(`[container-runner] Fatal error: ${err?.stack ?? err}\n`);
+  process.exit(1);
+}
+
+process.on('uncaughtException', (err) => {
+  reportFatalError(err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  reportFatalError(reason instanceof Error ? reason : new Error(String(reason)));
+});
+
 process.stderr.write('[container-runner] Starting...\n');
 
 const __filename = fileURLToPath(import.meta.url);
