@@ -5,6 +5,9 @@ import { createContainerExecutor } from './container-executor.js';
 import { createDenoExecutor } from './deno-executor.js';
 import { execSync } from 'node:child_process';
 import { isNode, isBun, getNodeMajorVersion } from '../utils/env.js';
+import { initializeLogger } from '../utils/logger.js';
+
+initializeLogger(true);
 
 // Run test suite against vm2
 // globalThis sealing doesn't work with vm2's proxy-based sandbox

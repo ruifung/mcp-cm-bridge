@@ -12,6 +12,9 @@ import { createContainerExecutor } from '../executor/container-executor.js';
 import { createDenoExecutor } from '../executor/deno-executor.js';
 import { isNode, isDeno, isBun, getNodeMajorVersion, getRuntimeName } from '../utils/env.js';
 import { execSync } from 'node:child_process';
+import { initializeLogger } from '../utils/logger.js';
+
+initializeLogger(true);
 
 console.log(`[E2E Runner] Detected Runtime: ${getRuntimeName()}`);
 
