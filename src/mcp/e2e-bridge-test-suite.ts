@@ -222,16 +222,25 @@ export function createE2EBridgeTestSuite(
     let client: Client;
 
     beforeAll(async () => {
+      const t0 = Date.now();
+      console.log('[E2E] beforeAll: starting setup...');
+
+      console.log('[E2E] beforeAll: creating executor...');
       upstreamState = await createMockUpstreamServer();
       const executor = createExecutor();
+      console.log(`[E2E] beforeAll: executor created (+${Date.now() - t0}ms), setting up upstream...`);
+
       // If executor has a lazy init (e.g. container), trigger it now so the
       // startup cost is not counted against the first test's timeout.
       if ('init' in executor && typeof (executor as any).init === 'function') {
         await (executor as any).init();
       }
+      console.log(`[E2E] beforeAll: upstream ready (+${Date.now() - t0}ms), creating bridge pipeline...`);
+
       bridgeState = await createBridgePipeline(upstreamState.upstreamClient, 'test', executor);
       client = bridgeState.downstreamClient;
-    }, options?.testTimeout ? options.testTimeout * 2 : undefined);
+      console.log(`[E2E] beforeAll: setup complete (+${Date.now() - t0}ms)`);
+    }, options?.testTimeout ? Math.max(options.testTimeout * 2, 120_000) : 120_000);
 
     afterAll(async () => {
       if (!bridgeState) return;

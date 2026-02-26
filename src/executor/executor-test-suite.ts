@@ -44,13 +44,20 @@ export function createExecutorTestSuite(
     let executor: Executor;
 
     beforeAll(async () => {
+      const t0 = Date.now();
+      console.log('[Executor] beforeAll: starting setup...');
+
+      console.log('[Executor] beforeAll: creating executor...');
       executor = createExecutor();
+      console.log(`[Executor] beforeAll: executor created (+${Date.now() - t0}ms), initialising...`);
+
       // If executor has a lazy init (e.g. container), trigger it now so the
       // startup cost is not counted against the first test's timeout.
       if ('init' in executor && typeof (executor as any).init === 'function') {
         await (executor as any).init();
       }
-    }, options?.testTimeout ? options.testTimeout * 2 : undefined);
+      console.log(`[Executor] beforeAll: setup complete (+${Date.now() - t0}ms)`);
+    }, options?.testTimeout ? Math.max(options.testTimeout * 2, 120_000) : 120_000);
 
     afterAll(async () => {
       // Cleanup if executor has dispose method
