@@ -234,10 +234,13 @@ export function createE2EBridgeTestSuite(
     }, options?.testTimeout ? options.testTimeout * 2 : undefined);
 
     afterAll(async () => {
+      if (!bridgeState) return;
       await bridgeState.downstreamClient.close();
       await bridgeState.bridgeServer.close();
-      await upstreamState.upstreamClient.close();
-      await upstreamState.upstream.close();
+      if (upstreamState) {
+        await upstreamState.upstreamClient.close();
+        await upstreamState.upstream.close();
+      }
       // Cleanup executor if it has a dispose method
       const executor = (bridgeState as any)._executor;
       if (executor && 'dispose' in executor && typeof executor.dispose === 'function') {

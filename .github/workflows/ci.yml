@@ -45,6 +45,13 @@ jobs:
         if: matrix.runtime == 'deno'
         run: npm install # Need vitest locally for Deno tests
 
+      - name: Pre-pull container images
+        run: |
+          docker pull oven/bun:debian &
+          docker pull denoland/deno:debian &
+          docker pull node:24-slim &
+          wait
+
       - name: Run Tests
         run: |
           if [ "${{ matrix.runtime }}" = "node" ]; then
