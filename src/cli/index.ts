@@ -80,7 +80,7 @@ program
   )
   .option(
     "-e, --executor <type>",
-    "Executor type (isolated-vm, container, deno, vm2)"
+    "Executor type (isolated-vm, container, deno)"
   )
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
