@@ -2,6 +2,7 @@ import type { Executor, ExecuteResult } from '@cloudflare/codemode';
 // @ts-ignore - isolated-vm is an optional dependency; this file is only loaded via dynamic import() when available
 import ivm from 'isolated-vm';
 import { wrapCode } from './wrap-code.js';
+import { logWarn } from '../utils/logger.js';
 const { Isolate, Context } = ivm;
 type IsolateType = InstanceType<typeof ivm.Isolate>;
 type ContextType = ReturnType<IsolateType['createContextSync']>;
@@ -41,6 +42,8 @@ export interface IsolatedVmExecutorOptions {
   inspector?: boolean;
   /** Execution timeout in ms (default: 30000) */
   timeout?: number;
+  /** Per-tool-call timeout in ms (default: same as timeout). If a single tool call exceeds this, its promise is rejected. */
+  toolCallTimeout?: number;
 }
 
 export interface ExecutionMetrics {
@@ -75,12 +78,14 @@ export class IsolatedVmExecutor implements Executor {
   private context: ContextType | null = null;
   private metrics: ExecutionMetrics | null = null;
   private readonly options: Required<IsolatedVmExecutorOptions>;
+  private pendingToolTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   constructor(options: IsolatedVmExecutorOptions = {}) {
     this.options = {
       memoryLimit: options.memoryLimit ?? 128,
       inspector: options.inspector ?? false,
       timeout: options.timeout ?? 30000,
+      toolCallTimeout: options.toolCallTimeout ?? (options.timeout ?? 30000),
     };
 
     this.isolate = new Isolate({
@@ -110,6 +115,10 @@ export class IsolatedVmExecutor implements Executor {
 
     // Tool invocation: Track call IDs for notification pattern
     let toolCallId = 0;
+    const cleanupPendingTimers = () => {
+      for (const timer of this.pendingToolTimers.values()) clearTimeout(timer);
+      this.pendingToolTimers.clear();
+    };
 
     try {
       // Set up console logging
@@ -197,31 +206,59 @@ export class IsolatedVmExecutor implements Executor {
           const callId = toolCallId++;
           const fn = fns[toolName];
 
+          let settled = false;
+
           const notifySuccess = async (value: unknown) => {
+            if (settled) return;
+            settled = true;
+            const timer = this.pendingToolTimers.get(callId);
+            if (timer !== undefined) {
+              clearTimeout(timer);
+              this.pendingToolTimers.delete(callId);
+            }
             try {
               const ref = await context.global.get('_toolResults');
               await ref.set(String(callId), new ivm.ExternalCopy(value).copyInto({ transferIn: true }));
               await resolverScript.run(context);
-            } catch {
-              // Ignore errors during cleanup
+            } catch (e) {
+              // Delivery failed -- fall back to notifying the isolate of an error
+              try {
+                const errMsg = `Tool result delivery failed: ${e instanceof Error ? e.message : String(e)}`;
+                const ref = await context.global.get('_toolErrors');
+                await ref.set(String(callId), new ivm.ExternalCopy(errMsg).copyInto({ transferIn: true }));
+                await resolverScript.run(context);
+              } catch { /* context disposed */ }
             }
           };
 
           const notifyError = async (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            const timer = this.pendingToolTimers.get(callId);
+            if (timer !== undefined) {
+              clearTimeout(timer);
+              this.pendingToolTimers.delete(callId);
+            }
             try {
               const errorMsg = error instanceof Error ? error.message : String(error);
               const ref = await context.global.get('_toolErrors');
               await ref.set(String(callId), new ivm.ExternalCopy(errorMsg).copyInto({ transferIn: true }));
               await resolverScript.run(context);
-            } catch {
-              // Ignore errors during cleanup
-            }
+            } catch { /* context disposed */ }
           };
 
           if (!fn) {
-            notifyError(new Error(`Tool '${toolName}' not found`));
+            void notifyError(new Error(`Tool '${toolName}' not found`));
             return callId;
           }
+
+          // Start per-tool-call timeout
+          const toolTimer = setTimeout(() => {
+            this.pendingToolTimers.delete(callId);
+            logWarn(`Tool '${toolName}' (callId=${callId}) timed out after ${this.options.toolCallTimeout}ms`, { component: 'IsolatedVmExecutor' });
+            void notifyError(new Error(`Tool '${toolName}' timed out after ${this.options.toolCallTimeout}ms`));
+          }, this.options.toolCallTimeout);
+          this.pendingToolTimers.set(callId, toolTimer);
 
           // Execute the tool async, spread array arguments
           fn(...(Array.isArray(toolArgs) ? toolArgs : [toolArgs]))
@@ -361,12 +398,14 @@ export class IsolatedVmExecutor implements Executor {
 
       // Wait for the Promise-based execution to complete
       const result = await resultPromise;
+      cleanupPendingTimers();
 
       // Capture metrics before cleanup
       await this.captureMetrics();
 
       return result;
     } catch (error) {
+      cleanupPendingTimers();
       await this.captureMetrics();
 
       const errorMessage =
@@ -405,6 +444,10 @@ export class IsolatedVmExecutor implements Executor {
    * Cleanup resources
    */
   dispose(): void {
+    // Cancel any in-flight tool-call timers
+    for (const timer of this.pendingToolTimers.values()) clearTimeout(timer);
+    this.pendingToolTimers.clear();
+
     if (this.context) {
       try {
         this.context.release();
