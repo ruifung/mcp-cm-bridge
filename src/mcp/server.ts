@@ -26,6 +26,7 @@ import type { Executor } from "@cloudflare/codemode";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
 import { adaptAISDKToolToMCP, createSessionAwareToolHandler, type ExecutorResolver } from "./mcp-adapter.js";
+import { SessionResolver } from "./session-resolver.js";
 import type { RegisteredTool } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
@@ -36,18 +37,6 @@ import { loadMCPConfigFile } from "./config.js";
 
 // Re-export MCPServerConfig and ExecutorType for backwards compatibility
 export type { MCPServerConfig, ExecutorType }
-
-// ── Per-session state (HTTP mode) ──────────────────────────────────────────
-
-/** Holds the per-session executor and its idle-timeout timer. */
-interface SessionState {
-  executor: Executor;
-  executorInfo: ExecutorInfo;
-  lastActivity: number;
-  idleTimer: ReturnType<typeof setTimeout>;
-}
-
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Convert JSON Schema to Zod schema
@@ -303,128 +292,25 @@ export async function startCodeModeBridgeServer(
   // available (e.g. status tool) and provides the initial executorInfo.
   // In HTTP mode the singleton has a 30-min idle timeout (same as per-session
   // executors) and is lazily re-created on demand after expiry.
-  let singletonExecutor: Executor | null;
-  let singletonIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const httpOptions = Array.isArray(serverConfigsOrOptions) ? undefined : serverConfigsOrOptions.http;
 
-  function resetSingletonIdleTimer(): void {
-    if (!httpOptions) return; // no timeout in stdio mode — singleton lives forever
-    if (singletonIdleTimer) clearTimeout(singletonIdleTimer);
-    singletonIdleTimer = setTimeout(async () => {
-      if (singletonExecutor) {
-        logInfo('Singleton executor idle timeout — disposing', { component: 'Bridge' });
-        try {
-          if (typeof (singletonExecutor as any).dispose === 'function') {
-            await (singletonExecutor as any).dispose();
-          }
-        } catch (err) {
-          logInfo(`Error disposing singleton executor: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
-        }
-        singletonExecutor = null;
-        singletonIdleTimer = null;
-      }
-    }, IDLE_TIMEOUT_MS);
-    singletonIdleTimer.unref();
-  }
-
   const { executor: initialExecutor, info: executorInfo } = await createExecutor(30000, resolvedExecutorType);
-  singletonExecutor = initialExecutor;
-  await singletonExecutor.execute('async () => { return "startup test" }', {});
+  await initialExecutor.execute('async () => { return "startup test" }', {});
 
-  // Start the idle timer for the singleton in HTTP mode
-  resetSingletonIdleTimer();
+  // ── SessionResolver ────────────────────────────────────────────────────────
+  const sessionResolver = new SessionResolver({
+    createExecutor: (timeout) => createExecutor(timeout, resolvedExecutorType),
+    initialExecutor,
+    initialExecutorInfo: executorInfo,
+    isHttpMode: !!httpOptions,
+    log: {
+      info: (msg) => logInfo(msg, { component: 'Bridge' }),
+      error: (msg, err) => logError(msg, err as Error | Record<string, any>),
+    },
+  });
 
-  // ── Per-session state (HTTP mode) ─────────────────────────────────────────
-  const sessions = new Map<string, SessionState>();
-  // Tracks in-flight session creations to prevent duplicate executors under
-  // concurrent tool calls for the same new session (race condition guard).
-  const sessionCreating = new Map<string, Promise<SessionState>>();
-
-  async function disposeSession(sessionId: string): Promise<void> {
-    const session = sessions.get(sessionId);
-    if (!session) return;
-    clearTimeout(session.idleTimer);
-    sessions.delete(sessionId);
-    try {
-      if (typeof (session.executor as any).dispose === 'function') {
-        await (session.executor as any).dispose();
-      }
-    } catch (err) {
-      logInfo(`Error disposing executor for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
-    }
-    logInfo(`Disposed executor for session ${sessionId}`, { component: 'Bridge' });
-  }
-
-  const resolveExecutor: ExecutorResolver = async (sessionId?: string): Promise<Executor> => {
-    if (!sessionId) {
-      // Stdio mode or requests without a session — use singleton.
-      // In HTTP mode the singleton may have been disposed by the idle timer;
-      // lazily re-create it so the fallback path keeps working.
-      if (!singletonExecutor) {
-        logInfo('Singleton executor was disposed; re-creating on demand', { component: 'Bridge' });
-        const { executor } = await createExecutor(30000, resolvedExecutorType);
-        singletonExecutor = executor;
-      }
-      resetSingletonIdleTimer();
-      return singletonExecutor;
-    }
-
-    let session = sessions.get(sessionId);
-    if (!session) {
-      // Lazy creation: first tool call for this session spins up a fresh executor.
-      // Use sessionCreating map to avoid duplicate executor creation under concurrency.
-      if (!sessionCreating.has(sessionId)) {
-        logInfo(`Creating executor for new session ${sessionId}`, { component: 'Bridge' });
-        const promise = (async (): Promise<SessionState> => {
-          const { executor, info } = await createExecutor(30000, resolvedExecutorType);
-          const timer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
-          timer.unref();
-          const newSession: SessionState = {
-            executor,
-            executorInfo: info,
-            lastActivity: Date.now(),
-            idleTimer: timer,
-          };
-          sessions.set(sessionId, newSession);
-          sessionCreating.delete(sessionId);
-          return newSession;
-        })();
-        promise.catch(() => sessionCreating.delete(sessionId)); // cleanup on failure
-        sessionCreating.set(sessionId, promise);
-      }
-      try {
-        session = await sessionCreating.get(sessionId)!;
-      } catch (err) {
-        logError(
-          `Failed to create executor for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-          err instanceof Error ? err : { error: String(err) }
-        );
-        // Fall back to singleton so the tool returns a graceful error rather
-        // than crashing the server.  Re-create the singleton if it was disposed.
-        logInfo(
-          `Failed to create isolated executor for session ${sessionId}, falling back to shared executor. Client isolation is NOT active for this session.`,
-          { component: 'Bridge' }
-        );
-        if (!singletonExecutor) {
-          logInfo('Singleton executor was disposed; re-creating on demand', { component: 'Bridge' });
-          const { executor } = await createExecutor(30000, resolvedExecutorType);
-          singletonExecutor = executor;
-        }
-        resetSingletonIdleTimer();
-        return singletonExecutor;
-      }
-    }
-
-    // Reset the idle timer on every activity
-    clearTimeout(session.idleTimer);
-    session.lastActivity = Date.now();
-    const resetTimer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
-    resetTimer.unref();
-    session.idleTimer = resetTimer;
-
-    return session.executor;
-  };
+  const resolveExecutor: ExecutorResolver = (sid) => sessionResolver.resolve(sid);
 
   // ── Initial eval tool ──────────────────────────────────────────────────────
   logInfo(
@@ -434,7 +320,7 @@ export async function startCodeModeBridgeServer(
 
   const initialCodemodeTool = createCodeTool({
     tools: allToolDescriptors,
-    executor: singletonExecutor,
+    executor: initialExecutor,
   });
 
   // Adapt the AI SDK Tool to MCP protocol and capture the handle for later updates.
@@ -460,16 +346,12 @@ export async function startCodeModeBridgeServer(
 
     // Build a reference tool with the singleton executor just to get the
     // updated description and inputSchema from createCodeTool.
-    // If the singleton was disposed by the idle timer, re-create it now.
-    if (!singletonExecutor) {
-      logInfo('Singleton executor was disposed; re-creating for tool rebuild', { component: 'Bridge' });
-      const { executor } = await createExecutor(30000, resolvedExecutorType);
-      singletonExecutor = executor;
-      resetSingletonIdleTimer();
-    }
+    // resolve() with no sessionId always routes to the singleton session,
+    // lazily re-creating it if it was disposed by the idle timer.
+    const singletonForRebuild = await sessionResolver.resolve();
     const referenceTool = createCodeTool({
       tools: descriptors,
-      executor: singletonExecutor,
+      executor: singletonForRebuild,
     });
 
     // Update the registered tool in-place.  The SDK will automatically send
@@ -533,17 +415,8 @@ export async function startCodeModeBridgeServer(
     configWatcher?.stop();
     tokenPersistence.stopWatching();
 
-    // Dispose all per-session executors first
-    await Promise.all(Array.from(sessions.keys()).map((sessionId) => disposeSession(sessionId)));
-
-    // Dispose the singleton executor (cancel its idle timer first)
-    if (singletonIdleTimer) {
-      clearTimeout(singletonIdleTimer);
-      singletonIdleTimer = null;
-    }
-    if (singletonExecutor && typeof (singletonExecutor as any).dispose === 'function') {
-      await (singletonExecutor as any).dispose();
-    }
+    // Dispose all per-session executors and the singleton executor
+    await sessionResolver.disposeAll();
 
     await serverManager.disconnectAll();
 

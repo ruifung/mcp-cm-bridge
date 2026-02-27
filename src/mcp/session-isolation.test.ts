@@ -1,12 +1,10 @@
 /**
  * Unit tests for the multi-client executor isolation feature.
  *
- * The session-to-executor mapping, race-condition guard, idle timeout, and
- * disposeSession logic all live as closures inside `startCodeModeBridgeServer`
- * in server.ts and are NOT exported.  Rather than coupling these tests to the
- * full server-startup path, we replicate the resolver/dispose pattern here
- * (following the guidance in the task spec) so we can inject mock dependencies
- * and exercise the algorithmic logic in isolation.
+ * These tests exercise the SessionResolver class extracted from server.ts.
+ * By injecting mock dependencies we can test the session-to-executor mapping,
+ * race-condition guard, idle timeout, singleton management, and disposeSession
+ * logic without any I/O or real executor creation.
  *
  * `createSessionAwareToolHandler` IS exported from mcp-adapter.ts and is
  * tested directly against the real module.
@@ -29,6 +27,7 @@ vi.mock('@cloudflare/codemode/ai', () => ({
 
 import { createSessionAwareToolHandler, type ExecutorResolver } from './mcp-adapter.js';
 import { createCodeTool } from '@cloudflare/codemode/ai';
+import { SessionResolver, DEFAULT_IDLE_TIMEOUT_MS, SINGLETON_SESSION_ID } from './session-resolver.js';
 
 // ── Test helpers / fixtures ────────────────────────────────────────────────
 
@@ -48,91 +47,7 @@ function makeMockCreateExecutor() {
   }));
 }
 
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // mirrors the constant in server.ts
-
-// ── Session resolver factory (replicates the closure logic in server.ts) ──
-//
-// This is a faithful reproduction of the resolveExecutor / disposeSession
-// closures that live inside startCodeModeBridgeServer.  Injecting
-// `createExecutorFn` in place of the real `createExecutor` import lets us
-// control executor creation without any I/O.
-
-interface SessionState {
-  executor: ReturnType<typeof makeMockExecutor>;
-  lastActivity: number;
-  idleTimer: ReturnType<typeof setTimeout>;
-}
-
-interface SessionResolver {
-  resolveExecutor: (sessionId?: string) => Promise<Executor>;
-  disposeSession: (sessionId: string) => Promise<void>;
-  sessions: Map<string, SessionState>;
-}
-
-function makeSessionResolver(
-  singletonExecutor: ReturnType<typeof makeMockExecutor>,
-  createExecutorFn: ReturnType<typeof makeMockCreateExecutor>,
-): SessionResolver {
-  const sessions = new Map<string, SessionState>();
-  const sessionCreating = new Map<string, Promise<SessionState>>();
-
-  async function disposeSession(sessionId: string): Promise<void> {
-    const session = sessions.get(sessionId);
-    if (!session) return;
-    clearTimeout(session.idleTimer);
-    sessions.delete(sessionId);
-    try {
-      if (typeof (session.executor as any).dispose === 'function') {
-        await (session.executor as any).dispose();
-      }
-    } catch {
-      // swallow — mirrors server.ts behaviour
-    }
-  }
-
-  const resolveExecutor = async (sessionId?: string): Promise<Executor> => {
-    if (!sessionId) {
-      return singletonExecutor;
-    }
-
-    let session = sessions.get(sessionId);
-    if (!session) {
-      if (!sessionCreating.has(sessionId)) {
-        const promise = (async (): Promise<SessionState> => {
-          const { executor } = await createExecutorFn(30000);
-          const timer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
-          timer.unref();
-          const newSession: SessionState = {
-            executor,
-            lastActivity: Date.now(),
-            idleTimer: timer,
-          };
-          sessions.set(sessionId, newSession);
-          sessionCreating.delete(sessionId);
-          return newSession;
-        })();
-        promise.catch(() => sessionCreating.delete(sessionId));
-        sessionCreating.set(sessionId, promise);
-      }
-      try {
-        session = await sessionCreating.get(sessionId)!;
-      } catch {
-        return singletonExecutor;
-      }
-    }
-
-    // Reset idle timer on every activity
-    clearTimeout(session.idleTimer);
-    session.lastActivity = Date.now();
-    const resetTimer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
-    resetTimer.unref();
-    session.idleTimer = resetTimer;
-
-    return session.executor;
-  };
-
-  return { resolveExecutor, disposeSession, sessions };
-}
+const IDLE_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 1. Session-to-executor mapping
@@ -147,7 +62,12 @@ describe('Session-to-executor mapping', () => {
     vi.useFakeTimers();
     singleton = makeMockExecutor();
     mockCreateExecutor = makeMockCreateExecutor();
-    resolver = makeSessionResolver(singleton, mockCreateExecutor);
+    resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: singleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
   });
 
   afterEach(() => {
@@ -156,19 +76,19 @@ describe('Session-to-executor mapping', () => {
   });
 
   it('should return the singleton executor when sessionId is undefined', async () => {
-    const executor = await resolver.resolveExecutor(undefined);
+    const executor = await resolver.resolve(undefined);
     expect(executor).toBe(singleton);
     expect(mockCreateExecutor).not.toHaveBeenCalled();
   });
 
   it('should create a new executor for a new session ID', async () => {
-    await resolver.resolveExecutor('session-alpha');
+    await resolver.resolve('session-alpha');
     expect(mockCreateExecutor).toHaveBeenCalledOnce();
   });
 
   it('should return the same executor on repeated calls for the same session ID', async () => {
-    const first = await resolver.resolveExecutor('session-bravo');
-    const second = await resolver.resolveExecutor('session-bravo');
+    const first = await resolver.resolve('session-bravo');
+    const second = await resolver.resolve('session-bravo');
 
     expect(first).toBe(second);
     // createExecutor should only be called once — the second call reuses the cached session
@@ -176,8 +96,8 @@ describe('Session-to-executor mapping', () => {
   });
 
   it('should create different executor instances for different session IDs', async () => {
-    const executorA = await resolver.resolveExecutor('session-charlie');
-    const executorB = await resolver.resolveExecutor('session-delta');
+    const executorA = await resolver.resolve('session-charlie');
+    const executorB = await resolver.resolve('session-delta');
 
     expect(executorA).not.toBe(executorB);
     expect(mockCreateExecutor).toHaveBeenCalledTimes(2);
@@ -186,14 +106,14 @@ describe('Session-to-executor mapping', () => {
   it('should fall back to singleton executor when executor creation fails', async () => {
     mockCreateExecutor.mockRejectedValueOnce(new Error('Container unavailable'));
 
-    const result = await resolver.resolveExecutor('session-echo');
+    const result = await resolver.resolve('session-echo');
 
     expect(result).toBe(singleton);
   });
 
   it('should return the singleton for an empty string session ID', async () => {
     // An empty string is falsy — treated the same as undefined
-    const executor = await resolver.resolveExecutor('');
+    const executor = await resolver.resolve('');
     expect(executor).toBe(singleton);
     expect(mockCreateExecutor).not.toHaveBeenCalled();
   });
@@ -212,7 +132,12 @@ describe('Race condition protection', () => {
     vi.useFakeTimers();
     singleton = makeMockExecutor();
     mockCreateExecutor = makeMockCreateExecutor();
-    resolver = makeSessionResolver(singleton, mockCreateExecutor);
+    resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: singleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
   });
 
   afterEach(() => {
@@ -223,9 +148,9 @@ describe('Race condition protection', () => {
   it('should create only one executor when concurrent calls arrive for the same new session', async () => {
     // Fire three concurrent resolve calls for the same brand-new session ID
     const [e1, e2, e3] = await Promise.all([
-      resolver.resolveExecutor('session-foxtrot'),
-      resolver.resolveExecutor('session-foxtrot'),
-      resolver.resolveExecutor('session-foxtrot'),
+      resolver.resolve('session-foxtrot'),
+      resolver.resolve('session-foxtrot'),
+      resolver.resolve('session-foxtrot'),
     ]);
 
     expect(mockCreateExecutor).toHaveBeenCalledOnce();
@@ -244,8 +169,8 @@ describe('Race condition protection', () => {
     mockCreateExecutor.mockReturnValueOnce(pendingCreate);
 
     // Kick off two concurrent calls
-    const p1 = resolver.resolveExecutor('session-golf');
-    const p2 = resolver.resolveExecutor('session-golf');
+    const p1 = resolver.resolve('session-golf');
+    const p2 = resolver.resolve('session-golf');
 
     // Resolve the pending creation
     resolveCreate({ executor: delayedExecutor, info: { type: 'vm2', reason: 'explicit', timeout: 30000 } });
@@ -271,7 +196,12 @@ describe('Idle timeout', () => {
     vi.useFakeTimers();
     singleton = makeMockExecutor();
     mockCreateExecutor = makeMockCreateExecutor();
-    resolver = makeSessionResolver(singleton, mockCreateExecutor);
+    resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: singleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
   });
 
   afterEach(() => {
@@ -280,50 +210,50 @@ describe('Idle timeout', () => {
   });
 
   it('should dispose the session after the idle timeout expires', async () => {
-    await resolver.resolveExecutor('session-hotel');
-    const session = resolver.sessions.get('session-hotel')!;
+    await resolver.resolve('session-hotel');
+    const session = resolver.getSession('session-hotel')!;
     expect(session).toBeDefined();
 
     // Advance fake clock by IDLE_TIMEOUT_MS to fire the timer
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS);
 
     // Session should be removed from the map
-    expect(resolver.sessions.has('session-hotel')).toBe(false);
+    expect(resolver.hasSession('session-hotel')).toBe(false);
     // dispose() on the executor should have been called
     expect(session.executor.dispose).toHaveBeenCalledOnce();
   });
 
   it('should reset the idle timer when a session is accessed again', async () => {
-    await resolver.resolveExecutor('session-india');
+    await resolver.resolve('session-india');
 
     // Advance to just before timeout
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS - 1000);
 
     // Activity: access the session again (timer resets)
-    await resolver.resolveExecutor('session-india');
+    await resolver.resolve('session-india');
 
     // Advance another IDLE_TIMEOUT_MS - 1 ms (still within the new window)
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS - 1000);
 
     // Session should still be alive because the timer was reset
-    expect(resolver.sessions.has('session-india')).toBe(true);
+    expect(resolver.hasSession('session-india')).toBe(true);
   });
 
   it('should dispose the session only after the reset timer expires', async () => {
-    await resolver.resolveExecutor('session-juliet');
-    const session = resolver.sessions.get('session-juliet')!;
+    await resolver.resolve('session-juliet');
+    const session = resolver.getSession('session-juliet')!;
 
     // Advance just before timeout and trigger activity to reset
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS - 5000);
-    await resolver.resolveExecutor('session-juliet');
+    await resolver.resolve('session-juliet');
 
     // Advance just past the original timeout (before the reset timer fires)
     await vi.advanceTimersByTimeAsync(5001);
-    expect(resolver.sessions.has('session-juliet')).toBe(true);
+    expect(resolver.hasSession('session-juliet')).toBe(true);
 
     // Now advance past the reset timer
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS);
-    expect(resolver.sessions.has('session-juliet')).toBe(false);
+    expect(resolver.hasSession('session-juliet')).toBe(false);
     expect(session.executor.dispose).toHaveBeenCalledOnce();
   });
 
@@ -345,7 +275,7 @@ describe('Idle timeout', () => {
     });
 
     try {
-      await resolver.resolveExecutor('session-kilo');
+      await resolver.resolve('session-kilo');
       // unref() should have been called at least once (on the initial idle timer)
       expect(unrefSpy).toHaveBeenCalled();
     } finally {
@@ -367,7 +297,12 @@ describe('disposeSession', () => {
     vi.useFakeTimers();
     singleton = makeMockExecutor();
     mockCreateExecutor = makeMockCreateExecutor();
-    resolver = makeSessionResolver(singleton, mockCreateExecutor);
+    resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: singleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
   });
 
   afterEach(() => {
@@ -376,17 +311,17 @@ describe('disposeSession', () => {
   });
 
   it('should remove the session from the sessions map', async () => {
-    await resolver.resolveExecutor('session-lima');
-    expect(resolver.sessions.has('session-lima')).toBe(true);
+    await resolver.resolve('session-lima');
+    expect(resolver.hasSession('session-lima')).toBe(true);
 
     await resolver.disposeSession('session-lima');
 
-    expect(resolver.sessions.has('session-lima')).toBe(false);
+    expect(resolver.hasSession('session-lima')).toBe(false);
   });
 
   it('should call executor.dispose() on the session executor', async () => {
-    await resolver.resolveExecutor('session-mike');
-    const session = resolver.sessions.get('session-mike')!;
+    await resolver.resolve('session-mike');
+    const session = resolver.getSession('session-mike')!;
 
     await resolver.disposeSession('session-mike');
 
@@ -396,8 +331,8 @@ describe('disposeSession', () => {
   it('should clear the idle timer when the session is disposed', async () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
 
-    await resolver.resolveExecutor('session-november');
-    const session = resolver.sessions.get('session-november')!;
+    await resolver.resolve('session-november');
+    const session = resolver.getSession('session-november')!;
     const timerId = session.idleTimer;
 
     clearTimeoutSpy.mockClear(); // ignore setup calls
@@ -413,8 +348,8 @@ describe('disposeSession', () => {
   });
 
   it('should not dispose the same executor twice when called concurrently', async () => {
-    await resolver.resolveExecutor('session-papa');
-    const session = resolver.sessions.get('session-papa')!;
+    await resolver.resolve('session-papa');
+    const session = resolver.getSession('session-papa')!;
 
     await Promise.all([
       resolver.disposeSession('session-papa'),
@@ -434,7 +369,7 @@ describe('disposeSession', () => {
       info: { type: 'vm2', reason: 'explicit', timeout: 30000 },
     });
 
-    await resolver.resolveExecutor('session-quebec');
+    await resolver.resolve('session-quebec');
 
     // Must not throw even when dispose() rejects
     await expect(resolver.disposeSession('session-quebec')).resolves.toBeUndefined();
@@ -591,63 +526,6 @@ describe('createSessionAwareToolHandler', () => {
 // The singleton executor in HTTP mode receives the same 30-min idle timeout as
 // per-session executors.  In stdio mode no timer is set — the singleton lives
 // for the lifetime of the process.
-//
-// This helper replicates the singleton timeout closure from server.ts so we
-// can test it without importing the full server bootstrap path.
-
-interface SingletonResolver {
-  resolveExecutor: (sessionId?: string) => Promise<Executor>;
-  getSingleton: () => Executor | null;
-  getSingletonIdleTimer: () => ReturnType<typeof setTimeout> | null;
-}
-
-function makeSingletonResolver(
-  initialExecutor: ReturnType<typeof makeMockExecutor>,
-  createExecutorFn: ReturnType<typeof makeMockCreateExecutor>,
-  isHttp: boolean,
-): SingletonResolver {
-  let singletonExecutor: Executor | null = initialExecutor;
-  let singletonIdleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function resetSingletonIdleTimer(): void {
-    if (!isHttp) return; // no timeout in stdio mode — singleton lives forever
-    if (singletonIdleTimer) clearTimeout(singletonIdleTimer);
-    singletonIdleTimer = setTimeout(async () => {
-      if (singletonExecutor) {
-        try {
-          if (typeof (singletonExecutor as any).dispose === 'function') {
-            await (singletonExecutor as any).dispose();
-          }
-        } catch {
-          // swallow — mirrors server.ts behaviour
-        }
-        singletonExecutor = null;
-        singletonIdleTimer = null;
-      }
-    }, IDLE_TIMEOUT_MS);
-    singletonIdleTimer.unref();
-  }
-
-  const resolveExecutor = async (sessionId?: string): Promise<Executor> => {
-    if (!sessionId) {
-      // Lazily re-create the singleton if it was disposed by the idle timer.
-      if (!singletonExecutor) {
-        const { executor } = await createExecutorFn(30000);
-        singletonExecutor = executor;
-      }
-      resetSingletonIdleTimer();
-      return singletonExecutor!;
-    }
-    // Per-session path — not under test here; fall back to singleton for simplicity.
-    return singletonExecutor!;
-  };
-
-  return {
-    resolveExecutor,
-    getSingleton: () => singletonExecutor,
-    getSingletonIdleTimer: () => singletonIdleTimer,
-  };
-}
 
 describe('Singleton executor idle timeout', () => {
   let mockSingleton: ReturnType<typeof makeMockExecutor>;
@@ -665,71 +543,96 @@ describe('Singleton executor idle timeout', () => {
   });
 
   it('should dispose the singleton executor after the idle timeout in HTTP mode', async () => {
-    const resolver = makeSingletonResolver(mockSingleton, mockCreateExecutor, true /* isHttp */);
+    const resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: mockSingleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
 
     // Trigger activity so the idle timer is armed
-    await resolver.resolveExecutor(undefined);
-    expect(resolver.getSingleton()).toBe(mockSingleton);
+    await resolver.resolve(undefined);
+    expect(resolver.getSession(SINGLETON_SESSION_ID)?.executor).toBe(mockSingleton);
 
     // Advance fake clock by exactly IDLE_TIMEOUT_MS to fire the timer
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS);
 
-    expect(resolver.getSingleton()).toBeNull();
+    expect(resolver.getSession(SINGLETON_SESSION_ID)?.executor ?? null).toBeNull();
     expect(mockSingleton.dispose).toHaveBeenCalledOnce();
   });
 
   it('should reset the singleton idle timer on each access in HTTP mode', async () => {
-    const resolver = makeSingletonResolver(mockSingleton, mockCreateExecutor, true /* isHttp */);
+    const resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: mockSingleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
 
     // Arm the timer with initial activity
-    await resolver.resolveExecutor(undefined);
+    await resolver.resolve(undefined);
 
     // Advance to just before timeout
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS - 1000);
 
     // Reset the timer with a second access
-    await resolver.resolveExecutor(undefined);
+    await resolver.resolve(undefined);
 
     // Advance another IDLE_TIMEOUT_MS - 1 ms — still inside the new window
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS - 1000);
 
     // Singleton should still be alive because the timer was reset
-    expect(resolver.getSingleton()).toBe(mockSingleton);
+    expect(resolver.getSession(SINGLETON_SESSION_ID)?.executor).toBe(mockSingleton);
     expect(mockSingleton.dispose).not.toHaveBeenCalled();
   });
 
   it('should lazily re-create the singleton executor after it has been disposed by timeout', async () => {
-    const resolver = makeSingletonResolver(mockSingleton, mockCreateExecutor, true /* isHttp */);
+    const resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: mockSingleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
 
     // Arm and fire the idle timer
-    await resolver.resolveExecutor(undefined);
+    await resolver.resolve(undefined);
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS);
-    expect(resolver.getSingleton()).toBeNull();
+    expect(resolver.getSession(SINGLETON_SESSION_ID)?.executor ?? null).toBeNull();
 
     // Accessing the singleton again should trigger lazy re-creation
-    const refreshedExecutor = await resolver.resolveExecutor(undefined);
+    const refreshedExecutor = await resolver.resolve(undefined);
 
     expect(mockCreateExecutor).toHaveBeenCalledOnce();
     expect(refreshedExecutor).not.toBeNull();
-    expect(refreshedExecutor).toBe(resolver.getSingleton());
+    expect(refreshedExecutor).toBe(resolver.getSession(SINGLETON_SESSION_ID)?.executor);
   });
 
   it('should NOT set an idle timer for the singleton in stdio mode', async () => {
-    const resolver = makeSingletonResolver(mockSingleton, mockCreateExecutor, false /* isHttp */);
+    const resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: mockSingleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: false,
+    });
 
     // Access the singleton — in stdio mode no timer should be armed
-    await resolver.resolveExecutor(undefined);
+    await resolver.resolve(undefined);
 
     // Advance well past the would-be timeout
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS * 2);
 
     // Singleton must still be alive — no timer was set
-    expect(resolver.getSingleton()).toBe(mockSingleton);
+    expect(resolver.getSession(SINGLETON_SESSION_ID)?.executor).toBe(mockSingleton);
     expect(mockSingleton.dispose).not.toHaveBeenCalled();
   });
 
   it('should call unref() on the singleton idle timer so it does not prevent process exit', async () => {
-    const resolver = makeSingletonResolver(mockSingleton, mockCreateExecutor, true /* isHttp */);
+    const resolver = new SessionResolver({
+      createExecutor: mockCreateExecutor,
+      initialExecutor: mockSingleton,
+      initialExecutorInfo: { type: 'vm2', reason: 'explicit', timeout: 30000 },
+      isHttpMode: true,
+    });
 
     // Intercept setTimeout to spy on the returned timer's unref method
     const realSetTimeout = globalThis.setTimeout;
@@ -747,7 +650,7 @@ describe('Singleton executor idle timeout', () => {
 
     try {
       // Trigger the singleton path — resetSingletonIdleTimer should call unref()
-      await resolver.resolveExecutor(undefined);
+      await resolver.resolve(undefined);
       expect(unrefSpy).toHaveBeenCalled();
     } finally {
       vi.restoreAllMocks();
