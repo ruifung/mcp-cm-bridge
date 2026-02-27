@@ -397,4 +397,45 @@ export async function startCodeModeBridgeServer(
     component: 'Bridge'
   });
   logInfo(`Exposing 'eval' and 'status' tools`, { component: 'Bridge' });
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    logInfo(`Shutting down (signal: ${signal})...`, { component: 'Bridge' });
+
+    try {
+      // 1. Close downstream transport
+      await transport.close();
+      logDebug('Downstream transport closed', { component: 'Bridge' });
+
+      // 2. Dispose of executor (kills subprocesses)
+      if (executor && typeof (executor as any).dispose === 'function') {
+        (executor as any).dispose();
+        logDebug('Executor disposed', { component: 'Bridge' });
+      }
+
+      // 3. Close all upstream connections
+      await Promise.all(mcpClients.map(client => client.close().catch(err => {
+        logError(`Error closing upstream client: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
+      })));
+      logDebug('Upstream connections closed', { component: 'Bridge' });
+
+      logInfo('Graceful shutdown complete', { component: 'Bridge' });
+      process.exit(0);
+    } catch (error) {
+      logError('Error during shutdown', error instanceof Error ? error : { error: String(error) });
+      process.exit(1);
+    }
+  };
+
+  // Listen for process signals
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Listen for stdin events (common for MCP stdio transport)
+  process.stdin.on('end', () => shutdown('stdin:end'));
+  process.stdin.on('close', () => shutdown('stdin:close'));
 }
