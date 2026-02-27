@@ -43,6 +43,7 @@ codemode-bridge run
 - [**Architecture**](./docs/architecture.md): How the bridge works, project structure, and logical flow.
 - [**Executors**](./docs/executors.md): Detailed comparison of sandbox backends (Deno, isolated-vm, Containers).
 - [**CLI & Configuration**](./docs/cli.md): Full command reference and configuration format.
+- [**HTTP Serve Mode**](./docs/http-serve.md): Multi-client HTTP transport, session isolation, and security.
 - [**Integration Guide**](./docs/integration.md): Setup instructions for Claude Desktop, VS Code, and more.
 - [**Development**](./docs/development.md): Build and test instructions for contributors.
 - [**Sandbox Hardening**](./docs/sandbox-hardening.md): Security details for the execution environments.

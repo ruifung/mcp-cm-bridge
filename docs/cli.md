@@ -4,24 +4,89 @@ The Code Mode Bridge provides a command-line interface for managing upstream ser
 
 ## CLI Commands
 
+### `run`
+
+Starts the bridge using the MCP stdio transport. This is the default transport and is used by AI assistants that communicate over stdin/stdout (e.g. Claude Desktop, OpenCode).
+
 ```bash
-# Start the bridge (default command)
 codemode-bridge run [options]
-  --servers <names>    Comma-separated list of servers to load
-  --config <path>      Custom config file path
-  --executor <type>    Force executor (deno, isolated-vm, container, vm2)
-  --debug              Enable debug logging
+  -c, --config <path>      Path to mcp.json config file
+  -s, --servers <names>    Comma-separated list of servers to load
+  -d, --debug              Enable debug logging
+  -e, --executor <type>    Force executor type (deno, isolated-vm, container, vm2)
+```
 
-# Version information (lists available executors)
-codemode-bridge --version
+```bash
+# Start with all configured servers
+codemode-bridge run
 
-# Configuration management
+# Start with a specific config and executor
+codemode-bridge run --config ./my-config.json --executor deno
+
+# Load only specific servers
+codemode-bridge run --servers "kubernetes,time"
+```
+
+### `serve`
+
+Starts the bridge as an HTTP server using the MCP StreamableHTTP transport. Supports multiple concurrent clients, each with isolated execution contexts.
+
+For detailed HTTP serve mode documentation including architecture and security considerations, see [HTTP Serve Mode](./http-serve.md).
+
+```bash
+codemode-bridge serve [options]
+  -c, --config <path>      Path to mcp.json config file
+  -s, --servers <names>    Comma-separated list of servers to load
+  -d, --debug              Enable debug logging
+  -e, --executor <type>    Force executor type (deno, isolated-vm, container, vm2)
+  -p, --port <number>      Port to listen on (default: 3000)
+      --host <string>      Host to bind to (default: localhost)
+```
+
+```bash
+# Start HTTP server on default port 3000
+codemode-bridge serve
+
+# Custom port and host
+codemode-bridge serve --port 8080 --host 0.0.0.0
+
+# With specific config and executor
+codemode-bridge serve --config ./my-config.json --executor vm2
+
+# Only load specific servers
+codemode-bridge serve --servers "github,slack" --port 3000
+```
+
+**Endpoints:**
+
+| Path | Method | Description |
+|------|--------|-------------|
+| `/mcp` | `POST` | MCP protocol messages (initialize, tool calls, etc.) |
+| `/mcp` | `GET` | SSE stream for server-to-client notifications |
+| `/mcp` | `DELETE` | Close a session |
+| `/health` | `GET` | Health check — returns `{"status": "ok"}` |
+
+> **`run` vs `serve`:** `run` uses stdio transport (one client, suitable for desktop AI assistants). `serve` uses HTTP transport and handles multiple concurrent clients with isolated sessions.
+
+### `config`
+
+Manages the server configuration file.
+
+```bash
 codemode-bridge config list              # Show all configured servers
 codemode-bridge config show <name>       # Show specific server config
 codemode-bridge config add <name>        # Add new server
 codemode-bridge config remove <name>     # Remove server
 codemode-bridge config edit <name>       # Edit server config
 codemode-bridge config info              # Show config file location
+```
+
+### `--version`
+
+Lists available executors and prints version information.
+
+```bash
+codemode-bridge --version
 ```
 
 ## Configuration Format
