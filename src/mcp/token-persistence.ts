@@ -9,6 +9,8 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { OAuthTokens, OAuthClientInformationMixed } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { FileWatcher } from '../utils/file-watcher.js';
+import { logInfo, logWarn } from '../utils/logger.js';
 
 interface StoredAuthInfo {
   clientInformation?: OAuthClientInformationMixed;
@@ -27,25 +29,26 @@ export class TokenPersistence {
   private configDir: string;
   private tokenFile: string;
   private storage: TokenStorage = {};
+  private watcher: FileWatcher | null = null;
 
   constructor() {
     this.configDir = join(homedir(), '.config', 'codemode-bridge');
     this.tokenFile = join(this.configDir, 'mcp-tokens.json');
-    this.loadStorage();
+    try {
+      this.loadStorage();
+    } catch (error) {
+      console.warn('Failed to load token storage:', error);
+      this.storage = {};
+    }
   }
 
   /**
    * Load tokens from disk
    */
   private loadStorage(): void {
-    try {
-      if (existsSync(this.tokenFile)) {
-        const content = readFileSync(this.tokenFile, 'utf-8');
-        this.storage = JSON.parse(content);
-      }
-    } catch (error) {
-      console.warn('Failed to load token storage:', error);
-      this.storage = {};
+    if (existsSync(this.tokenFile)) {
+      const content = readFileSync(this.tokenFile, 'utf-8');
+      this.storage = JSON.parse(content);
     }
   }
 
@@ -153,6 +156,41 @@ export class TokenPersistence {
      const isExpired = expiresAt < Date.now();
 
      return { exists: true, isExpired };
+   }
+
+   /**
+    * Start watching the token storage file for external changes.
+    * Safe to call multiple times — subsequent calls are no-ops.
+    */
+   startWatching(): void {
+     if (this.watcher !== null) {
+       return;
+     }
+
+     this.watcher = new FileWatcher(this.tokenFile, () => {
+       try {
+         this.loadStorage();
+         logInfo(
+           `Token storage updated by external process, reloaded ${Object.keys(this.storage).length} server tokens`,
+         );
+       } catch (error) {
+         logWarn(
+           `Failed to reload token storage after external change: ${error instanceof Error ? error.message : String(error)}`,
+         );
+       }
+     });
+
+     this.watcher.start();
+   }
+
+   /**
+    * Stop watching the token storage file and clean up the watcher.
+    */
+   stopWatching(): void {
+     if (this.watcher !== null) {
+       this.watcher.close();
+       this.watcher = null;
+     }
    }
 }
 

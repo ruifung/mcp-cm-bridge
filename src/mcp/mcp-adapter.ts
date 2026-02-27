@@ -5,17 +5,21 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Tool } from "ai";
 import { z } from "zod";
+
+export type { RegisteredTool };
 
 /**
  * Adapts an AI SDK Tool to MCP protocol format
  * Takes a codemode SDK tool and registers it with the MCP server
+ * Returns the RegisteredTool handle so the caller can call .update() later.
  */
 export async function adaptAISDKToolToMCP(
   mcp: McpServer,
   tool: Tool<any, any>
-): Promise<void> {
+): Promise<RegisteredTool> {
   // The tool from createCodeTool has:
   // - tool.description
   // - tool.inputSchema (Zod schema)
@@ -25,7 +29,7 @@ export async function adaptAISDKToolToMCP(
   const toolName = "eval";
 
   // Register the tool with the MCP server
-  mcp.registerTool(
+  const registeredTool = mcp.registerTool(
     toolName,
     {
       description: tool.description || "Execute code with tool orchestration",
@@ -61,4 +65,6 @@ export async function adaptAISDKToolToMCP(
       }
     }
   );
+
+  return registeredTool;
 }

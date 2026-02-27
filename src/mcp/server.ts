@@ -13,6 +13,7 @@
  * 4. Uses @cloudflare/codemode SDK to create the "codemode" tool with those tools
  * 5. Adapts the codemode SDK's AI SDK Tool to MCP protocol using a shim layer
  * 6. Exposes the "codemode" tool via MCP protocol downstream
+ * 7. Watches mcp.json for changes and hot-reloads upstream connections (live reload)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -21,8 +22,13 @@ import { createCodeTool } from "@cloudflare/codemode/ai";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
 import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
+import type { RegisteredTool } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
+import { ServerManager } from "./server-manager.js";
+import { ConfigWatcher } from "./config-watcher.js";
+import { tokenPersistence } from "./token-persistence.js";
+import { loadMCPConfigFile } from "./config.js";
 
 // Re-export MCPServerConfig and ExecutorType for backwards compatibility
 export type { MCPServerConfig, ExecutorType }
@@ -209,54 +215,37 @@ export function jsonSchemaToZod(schema: any): z.ZodType<any> {
   return z.any();
 }
 
-/**
- * Convert native MCP tool definitions to ToolDescriptor format
- * that createCodeTool() expects
- */
-function convertMCPToolToDescriptor(toolDef: MCPTool, client: MCPClient, toolName: string, serverName: string): any {
-  return {
-    description: toolDef.description || "",
-    inputSchema: jsonSchemaToZod(toolDef.inputSchema),
-    execute: async (args: any) => {
-      // Log the tool invocation
-      logDebug(`Calling tool: ${serverName}__${toolName}`, {
-        component: 'Tool Execution',
-        server: serverName,
-        tool: toolName,
-        args: JSON.stringify(args)
-      });
-
-      try {
-        // Execute the tool on the upstream server using the MCP client
-        const result = await client.callTool(toolName, args);
-        
-        // Log successful execution
-        logDebug(`Tool completed: ${serverName}__${toolName}`, {
-          component: 'Tool Execution',
-          server: serverName,
-          tool: toolName,
-          resultType: typeof result,
-          resultSize: JSON.stringify(result).length
-        });
-
-        return result;
-      } catch (error) {
-        logDebug(`Tool failed: ${serverName}__${toolName}`, {
-          component: 'Tool Execution',
-          server: serverName,
-          tool: toolName,
-          error: error instanceof Error ? error.message : String(error)
-        });
-        throw error;
-      }
-    },
-  };
+export interface StartServerOptions {
+  serverConfigs: MCPServerConfig[];
+  executorType?: ExecutorType;
+  /** Absolute path to the mcp.json config file — enables live reload when provided. */
+  configPath?: string;
+  /** If provided, only servers in this list are managed (passed through from --servers CLI flag). */
+  serverFilter?: string[];
 }
 
 export async function startCodeModeBridgeServer(
-  serverConfigs: MCPServerConfig[],
+  serverConfigsOrOptions: MCPServerConfig[] | StartServerOptions,
   executorType?: ExecutorType
 ) {
+  // Normalise the overloaded signature.
+  let serverConfigs: MCPServerConfig[];
+  let resolvedExecutorType: ExecutorType | undefined;
+  let configPath: string | undefined;
+  let serverFilter: string[] | undefined;
+
+  if (Array.isArray(serverConfigsOrOptions)) {
+    // Legacy call: startCodeModeBridgeServer(configs, executorType?)
+    serverConfigs = serverConfigsOrOptions;
+    resolvedExecutorType = executorType;
+  } else {
+    // New call: startCodeModeBridgeServer({ serverConfigs, executorType, configPath, serverFilter })
+    serverConfigs = serverConfigsOrOptions.serverConfigs;
+    resolvedExecutorType = serverConfigsOrOptions.executorType;
+    configPath = serverConfigsOrOptions.configPath;
+    serverFilter = serverConfigsOrOptions.serverFilter;
+  }
+
   // Enable buffering of stderr output from stdio tools during startup
   enableStderrBuffering();
 
@@ -265,99 +254,132 @@ export async function startCodeModeBridgeServer(
     version: "1.0.0",
   });
 
-  // Collect all tools from upstream MCP servers using official MCP SDK
-  const allToolDescriptors: Record<string, any> = {};
-  const toolsByServer: Record<string, string[]> = {}; // Track tools grouped by server
-  const mcpClients: MCPClient[] = []; // Keep track of clients for cleanup
-  let totalToolCount = 0;
+  // ── Connect all upstream servers via ServerManager ─────────────────────────
+  const serverManager = new ServerManager();
 
-  // Initialize all connections in parallel
-  const connectionPromises = serverConfigs.map(async (config) => {
-    try {
-      // Create client for this upstream MCP server using official SDK
-      const client = new MCPClient(config);
-      
-      // Connect to the upstream server
-      await client.connect();
-      mcpClients.push(client);
+  await Promise.all(
+    serverConfigs.map((config) => serverManager.connectServer(config.name, config))
+  );
 
-      // Get tools from this server in native MCP format (JSON Schema)
-      const serverTools = await client.listTools();
-      const toolCount = serverTools.length;
-      totalToolCount += toolCount;
-
-      logDebug(
-        `Server "${config.name}" has ${toolCount} tools`,
-        { component: 'Bridge' }
-      );
-
-      // Track tools for this server
-      toolsByServer[config.name] = [];
-
-      // Namespace tools by server name to avoid conflicts
-      // e.g., kubernetes.get_pod -> kubernetes__get_pod
-      // Convert native MCP tools (JSON Schema) to ToolDescriptor format (Zod)
-      for (const tool of serverTools) {
-        const namespacedName = `${config.name}__${tool.name}`;
-        toolsByServer[config.name].push(namespacedName);
-        // Convert the native MCP tool to ToolDescriptor format
-        const descriptor = convertMCPToolToDescriptor(tool, client, tool.name, config.name);
-        allToolDescriptors[namespacedName] = descriptor;
-      }
-
-      return { config: config.name, toolCount, success: true };
-    } catch (error) {
-      logError(
-        `Failed to connect to "${config.name}"`,
-        error instanceof Error ? error : { error: String(error) }
-      );
-      // Continue with other servers instead of failing completely
-      return { config: config.name, toolCount: 0, success: false };
-    }
-  });
-
-  // Wait for all connections to initialize in parallel
-  const results = await Promise.all(connectionPromises);
-
-  // Recalculate total tool count from results (in case totalToolCount wasn't updated due to timing)
-  totalToolCount = results.reduce((sum, result) => sum + (result?.toolCount || 0), 0);
+  const allToolDescriptors = serverManager.getAllToolDescriptors();
+  const totalToolCount = Object.keys(allToolDescriptors).length;
 
   logInfo(
-    `Total: ${totalToolCount} tools from ${serverConfigs.length} server(s)`,
+    `Total: ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
     { component: 'Bridge' }
   );
 
   // Log tools grouped by server
-  for (const [serverName, tools] of Object.entries(toolsByServer)) {
+  for (const { name, tools } of serverManager.getServerToolInfo()) {
     if (tools.length > 0) {
-      logInfo(
-        `${serverName}: ${tools.join(', ')}`,
-        { component: 'Bridge', server: serverName }
+      logInfo(`${name}: ${tools.join(', ')}`, { component: 'Bridge', server: name });
+    }
+  }
+
+  // ── Executor ───────────────────────────────────────────────────────────────
+  const { executor, info: executorInfo } = await createExecutor(30000, resolvedExecutorType);
+  await executor.execute('async () => { return "startup test" }', {});
+
+  // ── Initial eval tool ──────────────────────────────────────────────────────
+  logInfo(
+    `Creating codemode tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
+    { component: 'Bridge' }
+  );
+
+  const initialCodemodeTool = createCodeTool({
+    tools: allToolDescriptors,
+    executor,
+  });
+
+  // Adapt the AI SDK Tool to MCP protocol and capture the handle for later updates.
+  const registeredEvalTool: RegisteredTool = await adaptAISDKToolToMCP(mcp, initialCodemodeTool);
+
+  // ── Live-reload: rebuild the eval tool after server changes ───────────────
+  async function rebuildEvalTool(): Promise<void> {
+    const descriptors = serverManager.getAllToolDescriptors();
+    const count = Object.keys(descriptors).length;
+
+    logInfo(
+      `Rebuilding eval tool with ${count} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
+      { component: 'Bridge' }
+    );
+
+    const codemodeTool = createCodeTool({
+      tools: descriptors,
+      executor,
+    });
+
+    // Update the registered tool in-place.  The SDK will automatically send
+    // notifications/tools/list_changed to connected clients.
+    registeredEvalTool.update({
+      description: codemodeTool.description,
+      paramsSchema: codemodeTool.inputSchema as any,
+      callback: async (args: any) => {
+        try {
+          const result = await (codemodeTool.execute as Function)(args);
+          const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+          return { content: [{ type: "text" as const, text }] } as any;
+        } catch (error) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+          } as any;
+        }
+      },
+    });
+
+    logInfo('Eval tool rebuilt and tool-list-changed notification sent', { component: 'Bridge' });
+
+    // Log updated tool breakdown by server
+    for (const { name, tools } of serverManager.getServerToolInfo()) {
+      if (tools.length > 0) {
+        logInfo(`${name}: ${tools.join(', ')}`, { component: 'Bridge', server: name });
+      }
+    }
+  }
+
+  // ── Config watcher (live reload) ───────────────────────────────────────────
+  let configWatcher: ConfigWatcher | undefined;
+  if (configPath) {
+    try {
+      const initialConfig = loadMCPConfigFile(configPath);
+      configWatcher = new ConfigWatcher({
+        configPath,
+        serverFilter,
+        serverManager,
+        onServersChanged: rebuildEvalTool,
+      });
+      configWatcher.start(initialConfig);
+    } catch (error) {
+      // Non-fatal: if the initial config can't be read for the watcher we
+      // just skip live reload rather than crashing the bridge.
+      logError(
+        `Could not start config watcher (live reload disabled): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        error instanceof Error ? error : { error: String(error) }
       );
     }
   }
 
-  // Create the executor using the codemode SDK pattern
-  const { executor, info: executorInfo } = await createExecutor(30000, executorType); // 30 second timeout
-  await executor.execute('async () => { return "startup test" }', {})
+  // ── Token persistence watcher ──────────────────────────────────────────────
+  tokenPersistence.startWatching();
 
-  // Create the codemode tool using the codemode SDK
-  // Pass ToolDescriptor format (with Zod schemas and execute functions)
-  logInfo(
-    `Creating codemode tool with ${totalToolCount} tools from ${serverConfigs.length} server(s)`,
-    { component: 'Bridge' }
-  );
-  const codemodeTool = createCodeTool({
-    tools: allToolDescriptors,
-    executor,
-    // Let the SDK auto-generate description from available tools
-  });
+  // ── Graceful shutdown ──────────────────────────────────────────────────────
+  const shutdown = async () => {
+    logInfo("Shutting down bridge...", { component: 'Bridge' });
+    configWatcher?.stop();
+    tokenPersistence.stopWatching();
+    await serverManager.disconnectAll();
+    await mcp.close();
+  };
 
-  // Adapt the AI SDK Tool to MCP protocol format and register it
-  // The adaptAISDKToolToMCP function handles the protocol conversion
-  await adaptAISDKToolToMCP(mcp, codemodeTool);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
-  // Register the status tool — returns executor mode, upstream servers, and tool counts
+  // ── Status tool ────────────────────────────────────────────────────────────
   mcp.registerTool(
     "status",
     {
@@ -365,11 +387,8 @@ export async function startCodeModeBridgeServer(
       inputSchema: z.object({}).strict(),
     },
     async () => {
-      const servers = Object.entries(toolsByServer).map(([name, tools]) => ({
-        name,
-        toolCount: tools.length,
-        tools,
-      }));
+      const servers = serverManager.getServerToolInfo();
+      const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
 
       const status = {
         executor: {
@@ -378,7 +397,7 @@ export async function startCodeModeBridgeServer(
           timeout: executorInfo.timeout,
         },
         servers,
-        totalTools: totalToolCount,
+        totalTools,
       };
 
       return {
@@ -387,15 +406,12 @@ export async function startCodeModeBridgeServer(
     }
   );
 
-  // Connect downstream MCP transport (what the client connects to)
+  // ── Connect downstream transport ───────────────────────────────────────────
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
 
   logInfo(`Ready on stdio transport`, { component: 'Bridge' });
-
-  logDebug(`Registering tool request handler`, {
-    component: 'Bridge'
-  });
+  logDebug(`Registering tool request handler`, { component: 'Bridge' });
   logInfo(`Exposing 'eval' and 'status' tools`, { component: 'Bridge' });
 
   // Graceful shutdown handling

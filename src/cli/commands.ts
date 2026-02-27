@@ -19,7 +19,7 @@ import {
   getDefaultConfigDir,
   getConfigFilePath,
 } from "./config-manager.js";
-import { startCodeModeBridgeServer, type MCPServerConfig, type ExecutorType } from "../mcp/server.js";
+import { startCodeModeBridgeServer, type MCPServerConfig, type ExecutorType, type StartServerOptions } from "../mcp/server.js";
 import { getServerConfig } from "../mcp/config.js";
 import type { MCPServerConfigEntry, MCPJsonConfig } from "../mcp/config.js";
 import { initializeLogger, logInfo, logError, flushStderrBuffer } from "../utils/logger.js";
@@ -96,7 +96,13 @@ export async function runServer(
     );
 
     // Start the MCP bridge server
-    await startCodeModeBridgeServer(serverConfigs, executor as ExecutorType);
+    const startOptions: StartServerOptions = {
+      serverConfigs,
+      executorType: executor as ExecutorType,
+      configPath: getConfigFilePath(configPath),
+      serverFilter: servers && servers.length > 0 ? servers : undefined,
+    };
+    await startCodeModeBridgeServer(startOptions);
 
     // Flush buffered stderr output from stdio tools now that Bridge is fully running
     flushStderrBuffer();
