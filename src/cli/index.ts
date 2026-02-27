@@ -21,6 +21,7 @@
 import { Command } from "commander";
 import {
   runServer,
+  runServe,
   listServersCommand,
   showServerCommand,
   addServerCommand,
@@ -85,6 +86,47 @@ program
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
     await runServer(options.config, servers, options.debug, options.executor);
+  });
+
+// 'serve' command — HTTP transport
+program
+  .command("serve")
+  .description("Start the bridge MCP server over HTTP (StreamableHTTP transport)")
+  .option(
+    "-c, --config <path>",
+    `Path to mcp.json configuration file (default: ${defaultConfigPath})`
+  )
+  .option(
+    "-s, --servers <names>",
+    "Comma-separated list of servers to connect to"
+  )
+  .option(
+    "-d, --debug",
+    "Enable debug logging"
+  )
+  .option(
+    "-e, --executor <type>",
+    "Executor type (isolated-vm, vm2, container, deno)"
+  )
+  .option(
+    "-p, --port <number>",
+    "Port to listen on",
+    "3000"
+  )
+  .option(
+    "--host <string>",
+    "Host to bind to",
+    "localhost"
+  )
+  .option(
+    "--stateless",
+    "Use stateless HTTP transport (no session IDs)",
+    false
+  )
+  .action(async (options) => {
+    const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
+    const port = parseInt(options.port, 10);
+    await runServe(options.config, servers, options.debug, options.executor, port, options.host, options.stateless);
   });
 
 // Config command group

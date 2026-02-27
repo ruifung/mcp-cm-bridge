@@ -4,7 +4,7 @@
  * Architecture:
  * - Upstream: Use official MCP SDK's Client to connect to and collect tools from other MCP servers
  * - Orchestration: Pass collected tools to codemode SDK's createCodeTool()
- * - Downstream: Use MCP SDK to expose the codemode tool via MCP protocol (stdio transport)
+ * - Downstream: Use MCP SDK to expose the codemode tool via MCP protocol (stdio or HTTP transport)
  * 
  * This server:
  * 1. Connects to upstream MCP servers using official MCP SDK Client
@@ -18,6 +18,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import * as http from "node:http";
+import * as crypto from "node:crypto";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
@@ -222,6 +225,12 @@ export interface StartServerOptions {
   configPath?: string;
   /** If provided, only servers in this list are managed (passed through from --servers CLI flag). */
   serverFilter?: string[];
+  /** When provided, start an HTTP server instead of using stdio transport. */
+  http?: {
+    port: number;
+    host: string;
+    stateless: boolean;
+  };
 }
 
 export async function startCodeModeBridgeServer(
@@ -368,16 +377,35 @@ export async function startCodeModeBridgeServer(
   tokenPersistence.startWatching();
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
+  let isShuttingDown = false;
+  const httpOptions = Array.isArray(serverConfigsOrOptions) ? undefined : serverConfigsOrOptions.http;
+
+  // Transport close hook — set by startStdioTransport or startHttpTransport before signals are handled
+  let transportCloseFn: (() => Promise<void>) | undefined;
+
   const shutdown = async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
     logInfo("Shutting down bridge...", { component: 'Bridge' });
     configWatcher?.stop();
     tokenPersistence.stopWatching();
+
+    if (executor && typeof (executor as any).dispose === 'function') {
+      (executor as any).dispose();
+    }
+
     await serverManager.disconnectAll();
-    await mcp.close();
+
+    if (transportCloseFn) {
+      await transportCloseFn();
+    }
+
+    process.exit(0);
   };
 
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   // ── Status tool ────────────────────────────────────────────────────────────
   mcp.registerTool(
@@ -407,51 +435,188 @@ export async function startCodeModeBridgeServer(
   );
 
   // ── Connect downstream transport ───────────────────────────────────────────
+  if (httpOptions) {
+    await startHttpTransport(mcp, httpOptions, (fn) => { transportCloseFn = fn; });
+  } else {
+    await startStdioTransport(mcp, shutdown, (fn) => { transportCloseFn = fn; });
+  }
+}
+
+// ── Stdio transport helper ─────────────────────────────────────────────────
+
+async function startStdioTransport(
+  mcp: McpServer,
+  shutdown: () => Promise<void>,
+  registerTransportClose: (fn: () => Promise<void>) => void
+): Promise<void> {
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
 
+  // Register the transport close hook for graceful shutdown
+  registerTransportClose(() => transport.close());
+
   logInfo(`Ready on stdio transport`, { component: 'Bridge' });
   logDebug(`Registering tool request handler`, { component: 'Bridge' });
-  logInfo(`Exposing 'eval' and 'status' tools`, { component: 'Bridge' });
+  logInfo(`Exposing 'codemode' and 'status' tools`, { component: 'Bridge' });
 
-  // Graceful shutdown handling
-  let isShuttingDown = false;
-  const shutdown = async (signal: string) => {
-    if (isShuttingDown) return;
-    isShuttingDown = true;
+  // Also handle stdin close events for stdio transport
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+}
 
-    logInfo(`Shutting down (signal: ${signal})...`, { component: 'Bridge' });
+// ── HTTP transport helper ──────────────────────────────────────────────────
 
-    try {
-      // 1. Close downstream transport
-      await transport.close();
-      logDebug('Downstream transport closed', { component: 'Bridge' });
+async function startHttpTransport(
+  mcp: McpServer,
+  options: { port: number; host: string; stateless: boolean },
+  registerTransportClose: (fn: () => Promise<void>) => void
+): Promise<void> {
+  const { port, host, stateless } = options;
 
-      // 2. Dispose of executor (kills subprocesses)
-      if (executor && typeof (executor as any).dispose === 'function') {
-        (executor as any).dispose();
-        logDebug('Executor disposed', { component: 'Bridge' });
+  if (stateless) {
+    // Stateless mode: single transport + single MCP server instance, no session tracking
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+
+    await mcp.connect(transport);
+
+    const httpServer = http.createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${host}:${port}`);
+
+      if (url.pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
       }
 
-      // 3. Close all upstream connections
-      await Promise.all(mcpClients.map(client => client.close().catch(err => {
-        logError(`Error closing upstream client: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
-      })));
-      logDebug('Upstream connections closed', { component: 'Bridge' });
+      if (url.pathname === '/mcp') {
+        if (req.method === 'POST') {
+          const body = await readRequestBody(req);
+          await transport.handleRequest(req, res, body);
+        } else if (req.method === 'GET' || req.method === 'DELETE') {
+          await transport.handleRequest(req, res);
+        } else {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        }
+        return;
+      }
 
-      logInfo('Graceful shutdown complete', { component: 'Bridge' });
-      process.exit(0);
-    } catch (error) {
-      logError('Error during shutdown', error instanceof Error ? error : { error: String(error) });
-      process.exit(1);
-    }
-  };
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not Found' }));
+    });
 
-  // Listen for process signals
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+    await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
+    logInfo(`Ready on HTTP transport (stateless): http://${host}:${port}/mcp`, { component: 'Bridge' });
+    logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
 
-  // Listen for stdin events (common for MCP stdio transport)
-  process.stdin.on('end', () => shutdown('stdin:end'));
-  process.stdin.on('close', () => shutdown('stdin:close'));
+    registerTransportClose(async () => {
+      await transport.close();
+      httpServer.close();
+    });
+
+  } else {
+    // Stateful mode: one transport + one MCP server per session, tracked by session ID
+    const transports = new Map<string, StreamableHTTPServerTransport>();
+
+    const httpServer = http.createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${host}:${port}`);
+
+      if (url.pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+
+      if (url.pathname === '/mcp') {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+        if (req.method === 'POST') {
+          if (sessionId && transports.has(sessionId)) {
+            // Existing session
+            const transport = transports.get(sessionId)!;
+            const body = await readRequestBody(req);
+            await transport.handleRequest(req, res, body);
+          } else if (!sessionId) {
+            // New session initialisation — create a fresh transport + server
+            const sessionTransport = new StreamableHTTPServerTransport({
+              sessionIdGenerator: () => crypto.randomUUID(),
+              onsessioninitialized: (newSessionId) => {
+                transports.set(newSessionId, sessionTransport);
+                logDebug(`Session initialised: ${newSessionId}`, { component: 'Bridge' });
+                sessionTransport.onclose = () => {
+                  transports.delete(newSessionId);
+                  logDebug(`Session closed: ${newSessionId}`, { component: 'Bridge' });
+                };
+              },
+            });
+
+            // Each session gets its own McpServer connected to the shared upstream
+            // We reuse the already-registered mcp instance tools by connecting to it
+            await mcp.connect(sessionTransport);
+            const body = await readRequestBody(req);
+            await sessionTransport.handleRequest(req, res, body);
+          } else {
+            // Unknown session ID
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Session not found' }));
+          }
+        } else if (req.method === 'GET') {
+          if (sessionId && transports.has(sessionId)) {
+            const transport = transports.get(sessionId)!;
+            await transport.handleRequest(req, res);
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing or unknown session ID' }));
+          }
+        } else if (req.method === 'DELETE') {
+          if (sessionId && transports.has(sessionId)) {
+            const transport = transports.get(sessionId)!;
+            await transport.handleRequest(req, res);
+          } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Session not found' }));
+          }
+        } else {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        }
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not Found' }));
+    });
+
+    await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
+    logInfo(`Ready on HTTP transport (stateful): http://${host}:${port}/mcp`, { component: 'Bridge' });
+    logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
+
+    registerTransportClose(async () => {
+      // Close all open session transports
+      for (const transport of transports.values()) {
+        await transport.close().catch(() => {});
+      }
+      transports.clear();
+      httpServer.close();
+    });
+  }
+}
+
+// ── Utility ────────────────────────────────────────────────────────────────
+
+function readRequestBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => {
+      try {
+        resolve(data ? JSON.parse(data) : undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+    req.on('error', reject);
+  });
 }

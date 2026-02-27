@@ -118,8 +118,95 @@ export async function runServer(
 }
 
 /**
- * List all configured servers
+ * Run the bridge server over HTTP
  */
+export async function runServe(
+  configPath?: string,
+  servers?: string[],
+  debug?: boolean,
+  executor?: string,
+  port: number = 3000,
+  host: string = 'localhost',
+  stateless: boolean = false
+): Promise<void> {
+  try {
+    // Initialize logger with debug mode if requested
+    initializeLogger(debug);
+
+    console.error(chalk.cyan("\n🚀 Code Mode Bridge (HTTP)"));
+    console.error(chalk.cyan("==========================\n"));
+
+    logInfo(`Runtime: ${getRuntimeName()}`, { component: 'CLI' });
+
+    // Load the bridge configuration
+    const bridgeConfig = loadConfig(configPath);
+    logInfo(
+      `Loaded config from: ${getConfigFilePath(configPath)}`,
+      { component: 'CLI' }
+    );
+    logInfo(
+      `Found ${Object.keys(bridgeConfig.servers).length} configured servers`,
+      { component: 'CLI' }
+    );
+
+    // Determine which servers to connect to
+    let serverNames: string[] = [];
+
+    if (servers && servers.length > 0) {
+      serverNames = servers;
+      logInfo(`Loading servers: ${serverNames.join(", ")}`, { component: 'CLI' });
+    } else if (Object.keys(bridgeConfig.servers).length > 0) {
+      serverNames = Object.keys(bridgeConfig.servers);
+      logInfo(
+        `No servers specified, loading all configured servers: ${serverNames.join(", ")}`,
+        { component: 'CLI' }
+      );
+    } else {
+      console.error(
+        chalk.yellow("ℹ") + " No servers configured\n"
+      );
+    }
+
+    // Load server configurations
+    const serverConfigs: MCPServerConfig[] = [];
+    for (const serverName of serverNames) {
+      try {
+        const serverConfig = getServerConfig(bridgeConfig, serverName);
+        serverConfigs.push(serverConfig);
+        logInfo(`Loaded ${serverName}`, { component: 'CLI' });
+      } catch (err) {
+        logError(
+          `Failed to load ${serverName}`,
+          err instanceof Error ? err : { error: String(err) }
+        );
+        process.exit(1);
+      }
+    }
+
+    logInfo(
+      `Starting bridge with ${serverConfigs.length} server(s)`,
+      { component: 'CLI' }
+    );
+
+    // Start the MCP bridge server with HTTP transport
+    const startOptions: StartServerOptions = {
+      serverConfigs,
+      executorType: executor as ExecutorType,
+      configPath: getConfigFilePath(configPath),
+      serverFilter: servers && servers.length > 0 ? servers : undefined,
+      http: { port, host, stateless },
+    };
+    await startCodeModeBridgeServer(startOptions);
+
+    logInfo(`Bridge is running on http://${host}:${port}/mcp`, { component: 'CLI' });
+  } catch (error) {
+    logError(
+      "Error",
+      error instanceof Error ? error : { error: String(error) }
+    );
+    process.exit(1);
+  }
+}
 export function listServersCommand(configPath?: string): void {
   try {
     const config = loadConfig(configPath);
