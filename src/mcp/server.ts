@@ -19,6 +19,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import { createCodeTool } from "@cloudflare/codemode/ai";
@@ -220,6 +221,40 @@ export function jsonSchemaToZod(schema: any): z.ZodType<any> {
   return z.any();
 }
 
+// ── Shared status tool registration ───────────────────────────────────────
+
+function registerStatusTool(
+  target: McpServer,
+  executorInfo: ExecutorInfo,
+  serverManager: ServerManager
+): void {
+  target.registerTool(
+    "status",
+    {
+      description: "Get the current status of the codemode bridge: executor mode, upstream server connections, and available tools.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => {
+      const servers = serverManager.getServerToolInfo();
+      const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
+
+      const status = {
+        executor: {
+          type: executorInfo.type,
+          reason: executorInfo.reason,
+          timeout: executorInfo.timeout,
+        },
+        servers,
+        totalTools,
+      };
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+      } as any;
+    }
+  );
+}
+
 export interface StartServerOptions {
   serverConfigs: MCPServerConfig[];
   executorType?: ExecutorType;
@@ -358,6 +393,11 @@ export async function startCodeModeBridgeServer(
     // notifications/tools/list_changed to connected clients.
     // The callback uses the same per-session resolver pattern as the initial
     // registration so executor isolation is preserved after a live reload.
+    //
+    // TODO: In HTTP mode, this only updates the global McpServer which isn't connected
+    // to any transport. Per-session McpServer instances created by buildMcpServer() are
+    // not updated. To support live reload in HTTP mode, we need to track all active
+    // per-session McpServer instances and call registeredTool.update() on each.
     registeredEvalTool.update({
       description: referenceTool.description,
       paramsSchema: referenceTool.inputSchema as any,
@@ -431,35 +471,35 @@ export async function startCodeModeBridgeServer(
   process.once("SIGTERM", shutdown);
 
   // ── Status tool ────────────────────────────────────────────────────────────
-  mcp.registerTool(
-    "status",
-    {
-      description: "Get the current status of the codemode bridge: executor mode, upstream server connections, and available tools.",
-      inputSchema: z.object({}).strict(),
-    },
-    async () => {
-      const servers = serverManager.getServerToolInfo();
-      const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
-
-      const status = {
-        executor: {
-          type: executorInfo.type,
-          reason: executorInfo.reason,
-          timeout: executorInfo.timeout,
-        },
-        servers,
-        totalTools,
-      };
-
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
-      } as any;
-    }
-  );
+  registerStatusTool(mcp, executorInfo, serverManager);
 
   // ── Connect downstream transport ───────────────────────────────────────────
   if (httpOptions) {
-    await startHttpTransport(mcp, httpOptions, executorInfo, (fn) => { transportCloseFn = fn; });
+    // Factory: creates a fresh McpServer with all tools registered for each new HTTP session.
+    const buildMcpServer = (): McpServer => {
+      const sessionMcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
+
+      // Register the eval tool (session-aware: each call resolves its own executor via sessionId)
+      const sessionCodemodeTool = createCodeTool({
+        tools: serverManager.getAllToolDescriptors(),
+        executor: initialExecutor, // placeholder; actual executor resolved per-call via sessionId
+      });
+      // Return value (RegisteredTool) intentionally not captured — live reload for
+      // per-session tools is not yet implemented (see TODO in rebuildEvalTool)
+      adaptAISDKToolToMCP(
+        sessionMcp,
+        sessionCodemodeTool,
+        resolveExecutor,
+        () => serverManager.getAllToolDescriptors()
+      );
+
+      // Register the status tool
+      registerStatusTool(sessionMcp, executorInfo, serverManager);
+
+      return sessionMcp;
+    };
+
+    await startHttpTransport(mcp, httpOptions, executorInfo, (fn) => { transportCloseFn = fn; }, buildMcpServer);
   } else {
     await startStdioTransport(mcp, shutdown, (fn) => { transportCloseFn = fn; });
   }
@@ -490,18 +530,16 @@ async function startStdioTransport(
 // ── HTTP transport helper ──────────────────────────────────────────────────
 
 async function startHttpTransport(
-  mcp: McpServer,
+  _mcp: McpServer,
   options: { port: number; host: string },
   executorInfo: ExecutorInfo,
-  registerTransportClose: (fn: () => Promise<void>) => void
+  registerTransportClose: (fn: () => Promise<void>) => void,
+  buildMcpServer: () => McpServer
 ): Promise<void> {
   const { port, host } = options;
 
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID(),
-  });
-
-  await mcp.connect(transport);
+  // Per-session transport map: session ID → transport instance
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${host}:${port}`);
@@ -515,9 +553,57 @@ async function startHttpTransport(
     if (url.pathname === '/mcp') {
       if (req.method === 'POST') {
         const body = await readRequestBody(req);
-        await transport.handleRequest(req, res, body);
-      } else if (req.method === 'GET' || req.method === 'DELETE') {
-        await transport.handleRequest(req, res);
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+        if (sessionId && sessions.has(sessionId)) {
+          // Existing session — route to its transport
+          const transport = sessions.get(sessionId)!;
+          await transport.handleRequest(req, res, body);
+        } else if (!sessionId && isInitializeRequest(body)) {
+          // New session — create a fresh transport + McpServer pair
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => crypto.randomUUID(),
+            onsessioninitialized: (sid) => {
+              sessions.set(sid, transport);
+              logInfo(`Session initialized: ${sid}`, { component: 'Bridge' });
+              // Capture sid in closure for O(1) cleanup on close
+              transport.onclose = () => {
+                sessions.delete(sid);
+                logInfo(`Session closed: ${sid}`, { component: 'Bridge' });
+              };
+            },
+          });
+
+          const sessionMcp = buildMcpServer();
+          await sessionMcp.connect(transport);
+          await transport.handleRequest(req, res, body);
+        } else {
+          // No session header and not an initialize request — reject
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+            id: null,
+          }));
+        }
+      } else if (req.method === 'GET') {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        if (sessionId && sessions.has(sessionId)) {
+          await sessions.get(sessionId)!.handleRequest(req, res);
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unknown or missing session ID' }));
+        }
+      } else if (req.method === 'DELETE') {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        if (sessionId && sessions.has(sessionId)) {
+          const transport = sessions.get(sessionId)!;
+          await transport.handleRequest(req, res);
+          sessions.delete(sessionId);
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unknown or missing session ID' }));
+        }
       } else {
         res.writeHead(405, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Method Not Allowed' }));
@@ -539,7 +625,9 @@ async function startHttpTransport(
   logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
 
   registerTransportClose(async () => {
-    await transport.close();
+    // Close all active session transports
+    await Promise.all([...sessions.values()].map((t) => t.close().catch(() => {})));
+    sessions.clear();
     await new Promise<void>((resolve, reject) => {
       httpServer.close((err) => (err ? reject(err) : resolve()));
     });
