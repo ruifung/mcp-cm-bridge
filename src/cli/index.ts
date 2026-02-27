@@ -118,15 +118,10 @@ program
     "Host to bind to",
     "localhost"
   )
-  .option(
-    "--stateless",
-    "Use stateless HTTP transport (no session IDs)",
-    false
-  )
   .action(async (options) => {
     const servers = options.servers ? options.servers.split(",").map((s: string) => s.trim()) : undefined;
     const port = parseInt(options.port, 10);
-    await runServe(options.config, servers, options.debug, options.executor, port, options.host, options.stateless);
+    await runServe(options.config, servers, options.debug, options.executor, port, options.host);
   });
 
 // Config command group

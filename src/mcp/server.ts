@@ -22,9 +22,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import { createCodeTool } from "@cloudflare/codemode/ai";
+import type { Executor } from "@cloudflare/codemode";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
-import { adaptAISDKToolToMCP } from "./mcp-adapter.js";
+import { adaptAISDKToolToMCP, createSessionAwareToolHandler, type ExecutorResolver } from "./mcp-adapter.js";
 import type { RegisteredTool } from "./mcp-adapter.js";
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
@@ -35,6 +36,18 @@ import { loadMCPConfigFile } from "./config.js";
 
 // Re-export MCPServerConfig and ExecutorType for backwards compatibility
 export type { MCPServerConfig, ExecutorType }
+
+// ── Per-session state (HTTP mode) ──────────────────────────────────────────
+
+/** Holds the per-session executor and its idle-timeout timer. */
+interface SessionState {
+  executor: Executor;
+  executorInfo: ExecutorInfo;
+  lastActivity: number;
+  idleTimer: ReturnType<typeof setTimeout>;
+}
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Convert JSON Schema to Zod schema
@@ -229,7 +242,6 @@ export interface StartServerOptions {
   http?: {
     port: number;
     host: string;
-    stateless: boolean;
   };
 }
 
@@ -286,8 +298,133 @@ export async function startCodeModeBridgeServer(
   }
 
   // ── Executor ───────────────────────────────────────────────────────────────
-  const { executor, info: executorInfo } = await createExecutor(30000, resolvedExecutorType);
-  await executor.execute('async () => { return "startup test" }', {});
+  // The singleton executor is always created.  In stdio mode it handles all
+  // requests.  In HTTP mode it serves as the fallback when no sessionId is
+  // available (e.g. status tool) and provides the initial executorInfo.
+  // In HTTP mode the singleton has a 30-min idle timeout (same as per-session
+  // executors) and is lazily re-created on demand after expiry.
+  let singletonExecutor: Executor | null;
+  let singletonIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const httpOptions = Array.isArray(serverConfigsOrOptions) ? undefined : serverConfigsOrOptions.http;
+
+  function resetSingletonIdleTimer(): void {
+    if (!httpOptions) return; // no timeout in stdio mode — singleton lives forever
+    if (singletonIdleTimer) clearTimeout(singletonIdleTimer);
+    singletonIdleTimer = setTimeout(async () => {
+      if (singletonExecutor) {
+        logInfo('Singleton executor idle timeout — disposing', { component: 'Bridge' });
+        try {
+          if (typeof (singletonExecutor as any).dispose === 'function') {
+            await (singletonExecutor as any).dispose();
+          }
+        } catch (err) {
+          logInfo(`Error disposing singleton executor: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
+        }
+        singletonExecutor = null;
+        singletonIdleTimer = null;
+      }
+    }, IDLE_TIMEOUT_MS);
+    singletonIdleTimer.unref();
+  }
+
+  const { executor: initialExecutor, info: executorInfo } = await createExecutor(30000, resolvedExecutorType);
+  singletonExecutor = initialExecutor;
+  await singletonExecutor.execute('async () => { return "startup test" }', {});
+
+  // Start the idle timer for the singleton in HTTP mode
+  resetSingletonIdleTimer();
+
+  // ── Per-session state (HTTP mode) ─────────────────────────────────────────
+  const sessions = new Map<string, SessionState>();
+  // Tracks in-flight session creations to prevent duplicate executors under
+  // concurrent tool calls for the same new session (race condition guard).
+  const sessionCreating = new Map<string, Promise<SessionState>>();
+
+  async function disposeSession(sessionId: string): Promise<void> {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    clearTimeout(session.idleTimer);
+    sessions.delete(sessionId);
+    try {
+      if (typeof (session.executor as any).dispose === 'function') {
+        await (session.executor as any).dispose();
+      }
+    } catch (err) {
+      logInfo(`Error disposing executor for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`, { component: 'Bridge' });
+    }
+    logInfo(`Disposed executor for session ${sessionId}`, { component: 'Bridge' });
+  }
+
+  const resolveExecutor: ExecutorResolver = async (sessionId?: string): Promise<Executor> => {
+    if (!sessionId) {
+      // Stdio mode or requests without a session — use singleton.
+      // In HTTP mode the singleton may have been disposed by the idle timer;
+      // lazily re-create it so the fallback path keeps working.
+      if (!singletonExecutor) {
+        logInfo('Singleton executor was disposed; re-creating on demand', { component: 'Bridge' });
+        const { executor } = await createExecutor(30000, resolvedExecutorType);
+        singletonExecutor = executor;
+      }
+      resetSingletonIdleTimer();
+      return singletonExecutor;
+    }
+
+    let session = sessions.get(sessionId);
+    if (!session) {
+      // Lazy creation: first tool call for this session spins up a fresh executor.
+      // Use sessionCreating map to avoid duplicate executor creation under concurrency.
+      if (!sessionCreating.has(sessionId)) {
+        logInfo(`Creating executor for new session ${sessionId}`, { component: 'Bridge' });
+        const promise = (async (): Promise<SessionState> => {
+          const { executor, info } = await createExecutor(30000, resolvedExecutorType);
+          const timer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
+          timer.unref();
+          const newSession: SessionState = {
+            executor,
+            executorInfo: info,
+            lastActivity: Date.now(),
+            idleTimer: timer,
+          };
+          sessions.set(sessionId, newSession);
+          sessionCreating.delete(sessionId);
+          return newSession;
+        })();
+        promise.catch(() => sessionCreating.delete(sessionId)); // cleanup on failure
+        sessionCreating.set(sessionId, promise);
+      }
+      try {
+        session = await sessionCreating.get(sessionId)!;
+      } catch (err) {
+        logError(
+          `Failed to create executor for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          err instanceof Error ? err : { error: String(err) }
+        );
+        // Fall back to singleton so the tool returns a graceful error rather
+        // than crashing the server.  Re-create the singleton if it was disposed.
+        logInfo(
+          `Failed to create isolated executor for session ${sessionId}, falling back to shared executor. Client isolation is NOT active for this session.`,
+          { component: 'Bridge' }
+        );
+        if (!singletonExecutor) {
+          logInfo('Singleton executor was disposed; re-creating on demand', { component: 'Bridge' });
+          const { executor } = await createExecutor(30000, resolvedExecutorType);
+          singletonExecutor = executor;
+        }
+        resetSingletonIdleTimer();
+        return singletonExecutor;
+      }
+    }
+
+    // Reset the idle timer on every activity
+    clearTimeout(session.idleTimer);
+    session.lastActivity = Date.now();
+    const resetTimer = setTimeout(() => disposeSession(sessionId), IDLE_TIMEOUT_MS);
+    resetTimer.unref();
+    session.idleTimer = resetTimer;
+
+    return session.executor;
+  };
 
   // ── Initial eval tool ──────────────────────────────────────────────────────
   logInfo(
@@ -297,11 +434,19 @@ export async function startCodeModeBridgeServer(
 
   const initialCodemodeTool = createCodeTool({
     tools: allToolDescriptors,
-    executor,
+    executor: singletonExecutor,
   });
 
   // Adapt the AI SDK Tool to MCP protocol and capture the handle for later updates.
-  const registeredEvalTool: RegisteredTool = await adaptAISDKToolToMCP(mcp, initialCodemodeTool);
+  // In HTTP mode pass the resolver so each invocation gets the session's executor.
+  // In stdio mode (no httpOptions) the resolver is still passed; since all stdio
+  // calls arrive without a sessionId, resolveExecutor will return singletonExecutor.
+  const registeredEvalTool: RegisteredTool = await adaptAISDKToolToMCP(
+    mcp,
+    initialCodemodeTool,
+    resolveExecutor,
+    () => serverManager.getAllToolDescriptors()
+  );
 
   // ── Live-reload: rebuild the eval tool after server changes ───────────────
   async function rebuildEvalTool(): Promise<void> {
@@ -313,30 +458,28 @@ export async function startCodeModeBridgeServer(
       { component: 'Bridge' }
     );
 
-    const codemodeTool = createCodeTool({
+    // Build a reference tool with the singleton executor just to get the
+    // updated description and inputSchema from createCodeTool.
+    // If the singleton was disposed by the idle timer, re-create it now.
+    if (!singletonExecutor) {
+      logInfo('Singleton executor was disposed; re-creating for tool rebuild', { component: 'Bridge' });
+      const { executor } = await createExecutor(30000, resolvedExecutorType);
+      singletonExecutor = executor;
+      resetSingletonIdleTimer();
+    }
+    const referenceTool = createCodeTool({
       tools: descriptors,
-      executor,
+      executor: singletonExecutor,
     });
 
     // Update the registered tool in-place.  The SDK will automatically send
     // notifications/tools/list_changed to connected clients.
+    // The callback uses the same per-session resolver pattern as the initial
+    // registration so executor isolation is preserved after a live reload.
     registeredEvalTool.update({
-      description: codemodeTool.description,
-      paramsSchema: codemodeTool.inputSchema as any,
-      callback: async (args: any) => {
-        try {
-          const result = await (codemodeTool.execute as Function)(args);
-          const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-          return { content: [{ type: "text" as const, text }] } as any;
-        } catch (error) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-          } as any;
-        }
-      },
+      description: referenceTool.description,
+      paramsSchema: referenceTool.inputSchema as any,
+      callback: createSessionAwareToolHandler(resolveExecutor, () => serverManager.getAllToolDescriptors()),
     });
 
     logInfo('Eval tool rebuilt and tool-list-changed notification sent', { component: 'Bridge' });
@@ -378,7 +521,6 @@ export async function startCodeModeBridgeServer(
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   let isShuttingDown = false;
-  const httpOptions = Array.isArray(serverConfigsOrOptions) ? undefined : serverConfigsOrOptions.http;
 
   // Transport close hook — set by startStdioTransport or startHttpTransport before signals are handled
   let transportCloseFn: (() => Promise<void>) | undefined;
@@ -391,8 +533,16 @@ export async function startCodeModeBridgeServer(
     configWatcher?.stop();
     tokenPersistence.stopWatching();
 
-    if (executor && typeof (executor as any).dispose === 'function') {
-      (executor as any).dispose();
+    // Dispose all per-session executors first
+    await Promise.all(Array.from(sessions.keys()).map((sessionId) => disposeSession(sessionId)));
+
+    // Dispose the singleton executor (cancel its idle timer first)
+    if (singletonIdleTimer) {
+      clearTimeout(singletonIdleTimer);
+      singletonIdleTimer = null;
+    }
+    if (singletonExecutor && typeof (singletonExecutor as any).dispose === 'function') {
+      await (singletonExecutor as any).dispose();
     }
 
     await serverManager.disconnectAll();
@@ -404,8 +554,8 @@ export async function startCodeModeBridgeServer(
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
   // ── Status tool ────────────────────────────────────────────────────────────
   mcp.registerTool(
@@ -436,7 +586,7 @@ export async function startCodeModeBridgeServer(
 
   // ── Connect downstream transport ───────────────────────────────────────────
   if (httpOptions) {
-    await startHttpTransport(mcp, httpOptions, (fn) => { transportCloseFn = fn; });
+    await startHttpTransport(mcp, httpOptions, executorInfo, (fn) => { transportCloseFn = fn; });
   } else {
     await startStdioTransport(mcp, shutdown, (fn) => { transportCloseFn = fn; });
   }
@@ -468,140 +618,59 @@ async function startStdioTransport(
 
 async function startHttpTransport(
   mcp: McpServer,
-  options: { port: number; host: string; stateless: boolean },
+  options: { port: number; host: string },
+  executorInfo: ExecutorInfo,
   registerTransportClose: (fn: () => Promise<void>) => void
 ): Promise<void> {
-  const { port, host, stateless } = options;
+  const { port, host } = options;
 
-  if (stateless) {
-    // Stateless mode: single transport + single MCP server instance, no session tracking
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => crypto.randomUUID(),
+  });
 
-    await mcp.connect(transport);
+  await mcp.connect(transport);
 
-    const httpServer = http.createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', `http://${host}:${port}`);
+  const httpServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${host}:${port}`);
 
-      if (url.pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok' }));
-        return;
+    if (url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+      return;
+    }
+
+    if (url.pathname === '/mcp') {
+      if (req.method === 'POST') {
+        const body = await readRequestBody(req);
+        await transport.handleRequest(req, res, body);
+      } else if (req.method === 'GET' || req.method === 'DELETE') {
+        await transport.handleRequest(req, res);
+      } else {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
       }
+      return;
+    }
 
-      if (url.pathname === '/mcp') {
-        if (req.method === 'POST') {
-          const body = await readRequestBody(req);
-          await transport.handleRequest(req, res, body);
-        } else if (req.method === 'GET' || req.method === 'DELETE') {
-          await transport.handleRequest(req, res);
-        } else {
-          res.writeHead(405, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Method Not Allowed' }));
-        }
-        return;
-      }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+  });
 
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not Found' }));
-    });
-
-    await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
-    logInfo(`Ready on HTTP transport (stateless): http://${host}:${port}/mcp`, { component: 'Bridge' });
-    logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
-
-    registerTransportClose(async () => {
-      await transport.close();
-      httpServer.close();
-    });
-
-  } else {
-    // Stateful mode: one transport + one MCP server per session, tracked by session ID
-    const transports = new Map<string, StreamableHTTPServerTransport>();
-
-    const httpServer = http.createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', `http://${host}:${port}`);
-
-      if (url.pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok' }));
-        return;
-      }
-
-      if (url.pathname === '/mcp') {
-        const sessionId = req.headers['mcp-session-id'] as string | undefined;
-
-        if (req.method === 'POST') {
-          if (sessionId && transports.has(sessionId)) {
-            // Existing session
-            const transport = transports.get(sessionId)!;
-            const body = await readRequestBody(req);
-            await transport.handleRequest(req, res, body);
-          } else if (!sessionId) {
-            // New session initialisation — create a fresh transport + server
-            const sessionTransport = new StreamableHTTPServerTransport({
-              sessionIdGenerator: () => crypto.randomUUID(),
-              onsessioninitialized: (newSessionId) => {
-                transports.set(newSessionId, sessionTransport);
-                logDebug(`Session initialised: ${newSessionId}`, { component: 'Bridge' });
-                sessionTransport.onclose = () => {
-                  transports.delete(newSessionId);
-                  logDebug(`Session closed: ${newSessionId}`, { component: 'Bridge' });
-                };
-              },
-            });
-
-            // Each session gets its own McpServer connected to the shared upstream
-            // We reuse the already-registered mcp instance tools by connecting to it
-            await mcp.connect(sessionTransport);
-            const body = await readRequestBody(req);
-            await sessionTransport.handleRequest(req, res, body);
-          } else {
-            // Unknown session ID
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Session not found' }));
-          }
-        } else if (req.method === 'GET') {
-          if (sessionId && transports.has(sessionId)) {
-            const transport = transports.get(sessionId)!;
-            await transport.handleRequest(req, res);
-          } else {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Missing or unknown session ID' }));
-          }
-        } else if (req.method === 'DELETE') {
-          if (sessionId && transports.has(sessionId)) {
-            const transport = transports.get(sessionId)!;
-            await transport.handleRequest(req, res);
-          } else {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Session not found' }));
-          }
-        } else {
-          res.writeHead(405, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Method Not Allowed' }));
-        }
-        return;
-      }
-
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not Found' }));
-    });
-
-    await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
-    logInfo(`Ready on HTTP transport (stateful): http://${host}:${port}/mcp`, { component: 'Bridge' });
-    logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
-
-    registerTransportClose(async () => {
-      // Close all open session transports
-      for (const transport of transports.values()) {
-        await transport.close().catch(() => {});
-      }
-      transports.clear();
-      httpServer.close();
-    });
+  // The singleton executor already pulled the container image at startup.
+  if (executorInfo.type === 'container') {
+    logInfo('Container image already pre-pulled via startup executor', { component: 'Bridge' });
   }
+
+  await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
+  logInfo(`Ready on HTTP transport: http://${host}:${port}/mcp`, { component: 'Bridge' });
+  logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
+
+  registerTransportClose(async () => {
+    await transport.close();
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((err) => (err ? reject(err) : resolve()));
+    });
+  });
 }
 
 // ── Utility ────────────────────────────────────────────────────────────────

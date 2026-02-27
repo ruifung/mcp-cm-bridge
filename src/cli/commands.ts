@@ -126,8 +126,7 @@ export async function runServe(
   debug?: boolean,
   executor?: string,
   port: number = 3000,
-  host: string = 'localhost',
-  stateless: boolean = false
+  host: string = 'localhost'
 ): Promise<void> {
   try {
     // Initialize logger with debug mode if requested
@@ -194,7 +193,7 @@ export async function runServe(
       executorType: executor as ExecutorType,
       configPath: getConfigFilePath(configPath),
       serverFilter: servers && servers.length > 0 ? servers : undefined,
-      http: { port, host, stateless },
+      http: { port, host },
     };
     await startCodeModeBridgeServer(startOptions);
 
