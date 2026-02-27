@@ -294,11 +294,6 @@ export async function startCodeModeBridgeServer(
   // Enable buffering of stderr output from stdio tools during startup
   enableStderrBuffering();
 
-  const mcp = new McpServer({
-    name: "codemode-bridge",
-    version: "1.0.0",
-  });
-
   // ── Connect all upstream servers via ServerManager ─────────────────────────
   const serverManager = new ServerManager();
 
@@ -347,27 +342,12 @@ export async function startCodeModeBridgeServer(
 
   const resolveExecutor: ExecutorResolver = (sid) => sessionResolver.resolve(sid);
 
-  // ── Initial eval tool ──────────────────────────────────────────────────────
-  logInfo(
-    `Creating codemode tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
-    { component: 'Bridge' }
-  );
-
-  const initialCodemodeTool = createCodeTool({
-    tools: allToolDescriptors,
-    executor: initialExecutor,
-  });
-
-  // Adapt the AI SDK Tool to MCP protocol and capture the handle for later updates.
-  // In HTTP mode pass the resolver so each invocation gets the session's executor.
-  // In stdio mode (no httpOptions) the resolver is still passed; since all stdio
-  // calls arrive without a sessionId, resolveExecutor will return singletonExecutor.
-  const registeredEvalTool: RegisteredTool = await adaptAISDKToolToMCP(
-    mcp,
-    initialCodemodeTool,
-    resolveExecutor,
-    () => serverManager.getAllToolDescriptors()
-  );
+  // ── Per-session eval tool handle map ──────────────────────────────────────
+  // Tracks RegisteredTool handles for all active sessions, keyed by session ID.
+  // HTTP sessions use their UUID as key; stdio uses '__stdio__'.
+  // rebuildEvalTool() iterates this map so live-reload notifications reach
+  // every connected client regardless of transport mode.
+  const sessionToolHandles = new Map<string, RegisteredTool>();
 
   // ── Live-reload: rebuild the eval tool after server changes ───────────────
   async function rebuildEvalTool(): Promise<void> {
@@ -389,22 +369,23 @@ export async function startCodeModeBridgeServer(
       executor: singletonForRebuild,
     });
 
-    // Update the registered tool in-place.  The SDK will automatically send
-    // notifications/tools/list_changed to connected clients.
-    // The callback uses the same per-session resolver pattern as the initial
-    // registration so executor isolation is preserved after a live reload.
-    //
-    // TODO: In HTTP mode, this only updates the global McpServer which isn't connected
-    // to any transport. Per-session McpServer instances created by buildMcpServer() are
-    // not updated. To support live reload in HTTP mode, we need to track all active
-    // per-session McpServer instances and call registeredTool.update() on each.
-    registeredEvalTool.update({
+    // Build the update payload once and apply it to every active session handle.
+    // Each handle's .update() call triggers tools/list_changed on that session's
+    // connected client — whether stdio or HTTP.
+    const updatePayload = {
       description: referenceTool.description,
       paramsSchema: referenceTool.inputSchema as any,
       callback: createSessionAwareToolHandler(resolveExecutor, () => serverManager.getAllToolDescriptors()),
-    });
+    };
 
-    logInfo('Eval tool rebuilt and tool-list-changed notification sent', { component: 'Bridge' });
+    for (const handle of sessionToolHandles.values()) {
+      handle.update(updatePayload);
+    }
+
+    logInfo(
+      `Eval tool rebuilt and tool-list-changed notification sent to ${sessionToolHandles.size} session(s)`,
+      { component: 'Bridge' }
+    );
 
     // Log updated tool breakdown by server
     for (const { name, tools } of serverManager.getServerToolInfo()) {
@@ -470,37 +451,70 @@ export async function startCodeModeBridgeServer(
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
-  // ── Status tool ────────────────────────────────────────────────────────────
-  registerStatusTool(mcp, executorInfo, serverManager);
-
   // ── Connect downstream transport ───────────────────────────────────────────
+  //
+  // Architecture:
+  //   stdio mode  — A single global McpServer is created and connected to
+  //                 StdioServerTransport. Its eval tool handle is stored in
+  //                 sessionToolHandles under key '__stdio__'.
+  //   HTTP mode   — No global McpServer. buildMcpServer() creates a fresh
+  //                 McpServer for each connecting client. Handles are stored in
+  //                 sessionToolHandles keyed by session UUID and cleaned up on
+  //                 disconnect. The global `mcp` variable is not used.
+  //
+  // rebuildEvalTool() iterates sessionToolHandles to push live-reload updates
+  // to all active connections regardless of transport mode.
+
   if (httpOptions) {
-    // Factory: creates a fresh McpServer with all tools registered for each new HTTP session.
-    const buildMcpServer = (): McpServer => {
-      const sessionMcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
+    // Factory: creates a fresh McpServer + eval tool handle for each new HTTP session.
+    // Returns both so startHttpTransport can store the handle in sessionToolHandles.
+    const buildMcpServer = async (): Promise<{ mcpServer: McpServer; registeredEvalTool: RegisteredTool }> => {
+      const mcpServer = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
 
       // Register the eval tool (session-aware: each call resolves its own executor via sessionId)
       const sessionCodemodeTool = createCodeTool({
         tools: serverManager.getAllToolDescriptors(),
         executor: initialExecutor, // placeholder; actual executor resolved per-call via sessionId
       });
-      // Return value (RegisteredTool) intentionally not captured — live reload for
-      // per-session tools is not yet implemented (see TODO in rebuildEvalTool)
-      adaptAISDKToolToMCP(
-        sessionMcp,
+      const registeredEvalTool = await adaptAISDKToolToMCP(
+        mcpServer,
         sessionCodemodeTool,
         resolveExecutor,
         () => serverManager.getAllToolDescriptors()
       );
 
       // Register the status tool
-      registerStatusTool(sessionMcp, executorInfo, serverManager);
+      registerStatusTool(mcpServer, executorInfo, serverManager);
 
-      return sessionMcp;
+      return { mcpServer, registeredEvalTool };
     };
 
-    await startHttpTransport(mcp, httpOptions, executorInfo, (fn) => { transportCloseFn = fn; }, buildMcpServer);
+    await startHttpTransport(httpOptions, executorInfo, (fn) => { transportCloseFn = fn; }, buildMcpServer, sessionToolHandles);
   } else {
+    // stdio mode: create the single global McpServer and register tools on it.
+    const mcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
+
+    logInfo(
+      `Creating codemode tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
+      { component: 'Bridge' }
+    );
+
+    const initialCodemodeTool = createCodeTool({
+      tools: allToolDescriptors,
+      executor: initialExecutor,
+    });
+
+    // Adapt the AI SDK Tool to MCP protocol and store the handle for live-reload.
+    const stdioEvalHandle = await adaptAISDKToolToMCP(
+      mcp,
+      initialCodemodeTool,
+      resolveExecutor,
+      () => serverManager.getAllToolDescriptors()
+    );
+    sessionToolHandles.set('__stdio__', stdioEvalHandle);
+
+    registerStatusTool(mcp, executorInfo, serverManager);
+
     await startStdioTransport(mcp, shutdown, (fn) => { transportCloseFn = fn; });
   }
 }
@@ -530,11 +544,11 @@ async function startStdioTransport(
 // ── HTTP transport helper ──────────────────────────────────────────────────
 
 async function startHttpTransport(
-  _mcp: McpServer,
   options: { port: number; host: string },
   executorInfo: ExecutorInfo,
   registerTransportClose: (fn: () => Promise<void>) => void,
-  buildMcpServer: () => McpServer
+  buildMcpServer: () => Promise<{ mcpServer: McpServer; registeredEvalTool: RegisteredTool }>,
+  sessionToolHandles: Map<string, RegisteredTool>
 ): Promise<void> {
   const { port, host } = options;
 
@@ -560,22 +574,29 @@ async function startHttpTransport(
           const transport = sessions.get(sessionId)!;
           await transport.handleRequest(req, res, body);
         } else if (!sessionId && isInitializeRequest(body)) {
-          // New session — create a fresh transport + McpServer pair
+          // New session — create a fresh transport + McpServer pair.
+          // buildMcpServer() is called first so the registeredEvalTool is
+          // available when onsessioninitialized fires with the session ID.
+          const { mcpServer, registeredEvalTool } = await buildMcpServer();
+
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => crypto.randomUUID(),
             onsessioninitialized: (sid) => {
               sessions.set(sid, transport);
+              // Store the eval tool handle for this session so rebuildEvalTool()
+              // can push live-reload updates to it.
+              sessionToolHandles.set(sid, registeredEvalTool);
               logInfo(`Session initialized: ${sid}`, { component: 'Bridge' });
               // Capture sid in closure for O(1) cleanup on close
               transport.onclose = () => {
                 sessions.delete(sid);
+                sessionToolHandles.delete(sid);
                 logInfo(`Session closed: ${sid}`, { component: 'Bridge' });
               };
             },
           });
 
-          const sessionMcp = buildMcpServer();
-          await sessionMcp.connect(transport);
+          await mcpServer.connect(transport);
           await transport.handleRequest(req, res, body);
         } else {
           // No session header and not an initialize request — reject
@@ -600,6 +621,7 @@ async function startHttpTransport(
           const transport = sessions.get(sessionId)!;
           await transport.handleRequest(req, res);
           sessions.delete(sessionId);
+          sessionToolHandles.delete(sessionId);
         } else {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Unknown or missing session ID' }));
@@ -625,9 +647,10 @@ async function startHttpTransport(
   logInfo(`Health endpoint: http://${host}:${port}/health`, { component: 'Bridge' });
 
   registerTransportClose(async () => {
-    // Close all active session transports
+    // Close all active session transports and clear tracking maps
     await Promise.all([...sessions.values()].map((t) => t.close().catch(() => {})));
     sessions.clear();
+    sessionToolHandles.clear();
     await new Promise<void>((resolve, reject) => {
       httpServer.close((err) => (err ? reject(err) : resolve()));
     });
