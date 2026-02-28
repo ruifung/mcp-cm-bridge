@@ -10,8 +10,8 @@
  * 1. Connects to upstream MCP servers using official MCP SDK Client
  * 2. Collects tools from all upstream servers in native MCP format (JSON Schema)
  * 3. Converts tools to ToolDescriptor format (with Zod schemas)
- * 4. Registers the "eval" tool directly on McpServer using normalizeCode + executor.execute()
- * 5. Exposes the "eval" tool via MCP protocol downstream
+ * 4. Registers the "sandbox_eval_js" tool directly on McpServer using normalizeCode + executor.execute()
+ * 5. Exposes the "sandbox_eval_js" tool via MCP protocol downstream
  * 6. Watches mcp.json for changes and hot-reloads upstream connections (live reload)
  */
 
@@ -117,23 +117,33 @@ export function paginateToolList(input: PaginateInput): PaginateOutput | { error
 
 /**
  * Short, static description for the eval tool.
- * Discovery tools (get_tools, search_tools, get_tool_schema) let the LLM
+ * Discovery tools (sandbox_get_functions, sandbox_search_functions, sandbox_get_function_schema) let the LLM
  * find the correct callable name and parameter types before writing code.
  */
-const EVAL_TOOL_DESCRIPTION = `Execute JavaScript/TypeScript code in a sandboxed environment.
+const EVAL_TOOL_DESCRIPTION = `Execute JavaScript code in a sandboxed environment. Use this to call upstream functions exposed on the codemode object. Other sandbox_* tools are for discovery only and are called directly as tools, not from inside this code.
 
-## Usage
-Write the body of an async function using the \`codemode\` object to call tools:
-  const result = await codemode.toolName({ param: "value" });
+Before writing code, follow this sequence:
+1. Discover: call sandbox_search_functions or sandbox_get_functions to find the function you need.
+2. Inspect: call sandbox_get_function_schema to get the exact TypeScript signature and parameter types.
+3. Execute: call this tool with code that uses the codemode object to invoke those functions.
+
+The code parameter accepts one of two formats. Do not mix them.
+
+Format A — Bare statements. Write one or more JavaScript statements. They will be wrapped in an async function automatically. You can use await freely. To produce output, either use an explicit return statement, or let the last expression be the value you want returned (it is returned automatically). If you do not return a value and there is no final expression, the result is null.
+
+  const result = await codemode.server_name__function_name({ param: "value" });
   return result;
 
-You may also pass a complete async arrow function expression if preferred.
+Format B — A complete async arrow function expression. The entire input must be the function; do not include any other top-level statements. You must use an explicit return statement.
 
-## Discovering available tools
-Use the \`name\` field returned by discovery tools as the property on \`codemode\`:
-- \`search_tools\` — find tools by keyword
-- \`get_tools\` — list tools by server
-- \`get_tool_schema\` — get the TypeScript type definition for a specific tool`;
+  async () => {
+    const result = await codemode.server_name__function_name({ param: "value" });
+    return result;
+  }
+
+The sandbox provides only the codemode object. No other APIs are available: no filesystem functions, no network functions, no require() or import statements. The only callable functions are properties on the codemode object.
+
+The return value must be JSON-serializable: strings, numbers, booleans, arrays, plain objects, or null. Functions and class instances cannot be returned. Returning undefined is not supported. Thrown exceptions fail the call.`;
 
 // ── Shared status tool registration ───────────────────────────────────────
 
@@ -143,9 +153,9 @@ function registerStatusTool(
   serverManager: ServerManager
 ): void {
   target.registerTool(
-    "status",
+    "sandbox_status",
     {
-      description: "Get the current status of the codemode bridge: executor mode, available tool servers. Use this to obtain a list of tool servers.",
+      description: "Return the current status of the codemode bridge, including connected server names and the number of functions each server provides. Use this to see which servers are available before calling sandbox_get_functions.",
       inputSchema: z.object({}).strict(),
     },
     async () => {
@@ -173,9 +183,9 @@ function registerStatusTool(
 
 /**
  * Register the three lazy discovery tools on the given McpServer:
- *   - get_tools: list all tools grouped by server
- *   - get_tool_schema: get the TypeScript type definition for a specific tool
- *   - search_tools: keyword-search the tool index
+ *   - sandbox_get_functions: list all tools grouped by server
+ *   - sandbox_get_function_schema: get the TypeScript type definition for a specific tool
+ *   - sandbox_search_functions: keyword-search the tool index
  *
  * @param target       The McpServer to register tools on
  * @param serverManager Source of tool metadata
@@ -189,15 +199,15 @@ function registerDiscoveryTools(
   searchProvider: BM25SearchProvider,
   schemaCache: Map<string, string>
 ): void {
-  // ── get_tools ──────────────────────────────────────────────────────────────
+  // ── sandbox_get_functions ──────────────────────────────────────────────────────
   target.registerTool(
-    "get_tools",
+    "sandbox_get_functions",
     {
-      description: "List all available tools grouped by server. Use this to discover what servers and tools are connected to the bridge.",
+      description: "List available functions grouped by server. Each entry includes the function name and its description. Use the returned name value as the property name on the codemode object when writing code for sandbox_eval_js, and as the tool_name argument when calling sandbox_get_function_schema.\n\nFunction names follow the pattern serverName__functionName, where a double underscore separates the server namespace from the original function name. For example, a function called list_items on a server named inventory becomes inventory__list_items.\n\nResults are paginated. The first call returns the first page. If the response includes a nextCursor value, pass it as the cursor parameter to retrieve the next page.",
       inputSchema: z.object({
-        server: z.string().optional().describe("Server name to filter by. Omit to list all servers."),
-        cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit for the first page."),
-        pageSize: z.number().int().min(1).max(200).default(50).optional().describe("Number of tools per page (1–200, default 50)."),
+        server: z.string().optional().describe("Filter results to a single server by name. Omit this parameter to list functions from all connected servers."),
+        cursor: z.string().optional().describe("Pagination cursor returned in the nextCursor field of a previous response. Omit this parameter for the first page. The cursor is opaque. Do not parse or construct it yourself."),
+        pageSize: z.number().int().min(1).max(200).default(50).optional().describe("Number of functions to return per page. Must be between 1 and 200. Defaults to 50 if omitted."),
       }).strict(),
     },
     async (args) => {
@@ -213,13 +223,13 @@ function registerDiscoveryTools(
     }
   );
 
-  // ── get_tool_schema ────────────────────────────────────────────────────────
+  // ── sandbox_get_function_schema ────────────────────────────────────────────
   target.registerTool(
-    "get_tool_schema",
+    "sandbox_get_function_schema",
     {
-      description: "Get the TypeScript type definition for a specific tool. Use the tool name (e.g. gitlab__list_projects) from get_tools or search_tools.",
+      description: "Return the TypeScript type definition for a specific function. The output includes the input parameter types, the return type, and JSDoc comments describing each parameter. Use this to determine the exact parameter names, types, and which parameters are required before writing code for sandbox_eval_js.\n\nPass the function name exactly as returned by sandbox_get_functions or sandbox_search_functions (for example, server_name__function_name).",
       inputSchema: z.object({
-        tool_name: z.string().describe("Tool name (e.g. gitlab__list_projects)"),
+        tool_name: z.string().describe("The function name to look up, exactly as returned by sandbox_get_functions or sandbox_search_functions. Example: server_name__function_name."),
       }).strict(),
     },
     async (args) => {
@@ -235,7 +245,7 @@ function registerDiscoveryTools(
         return {
           content: [{
             type: "text" as const,
-            text: `Tool "${args.tool_name}" not found. Use get_tools to list available tools.`,
+            text: `Tool "${args.tool_name}" not found. Use sandbox_get_functions to list available tools.`,
           }],
         } as any;
       }
@@ -249,14 +259,14 @@ function registerDiscoveryTools(
     }
   );
 
-  // ── search_tools ───────────────────────────────────────────────────────────
+  // ── sandbox_search_functions ───────────────────────────────────────────────────
   target.registerTool(
-    "search_tools",
+    "sandbox_search_functions",
     {
-      description: "Search for tools by keyword. Returns matching tools with their names, descriptions, and TypeScript type definitions.",
+      description: "Search for functions by keyword. Matches against function names and descriptions. Returns the top results ranked by relevance. Each result includes the function name and its description, and may include a TypeScript type definition. If you need exact parameter names and types, call sandbox_get_function_schema. Use this instead of sandbox_get_functions when you know what you are looking for but do not know the exact function name.",
       inputSchema: z.object({
-        query: z.string().describe("Search query (keywords matching tool names and descriptions)"),
-        limit: z.number().int().min(1).max(20).optional().describe("Max results to return (default: 5)"),
+        query: z.string().describe("One or more keywords to search for. Matched against function names and descriptions. Example: list projects."),
+        limit: z.number().int().min(1).max(20).optional().describe("Maximum number of results to return. Must be between 1 and 20. Defaults to 5 if omitted."),
       }).strict(),
     },
     async (args) => {
@@ -362,7 +372,7 @@ export async function startCodeModeBridgeServer(
 
   // ── Eval tool schema (static) ─────────────────────────────────────────────
   const evalInputSchema = z.object({
-    code: z.string().describe("Async arrow function expression to execute"),
+    code: z.string().describe("JavaScript code to execute. Provide either bare statements (auto-wrapped in an async function) or a complete async () => { ... } arrow function expression. If the input starts with async () =>, the entire input must be that function. Do not combine both formats in one call."),
   });
 
   // ── Eval tool handler factory ─────────────────────────────────────────────
@@ -401,7 +411,7 @@ export async function startCodeModeBridgeServer(
   // caller can call .update() for live-reload.
   function registerEvalTool(mcpServer: McpServer): RegisteredTool {
     return mcpServer.registerTool(
-      "eval",
+      "sandbox_eval_js",
       {
         description: EVAL_TOOL_DESCRIPTION,
         inputSchema: evalInputSchema,
@@ -586,7 +596,7 @@ async function startStdioTransport(
 
   logInfo(`Ready on stdio transport`, { component: 'Bridge' });
   logDebug(`Registering tool request handler`, { component: 'Bridge' });
-  logInfo(`Exposing 'codemode' and 'status' tools`, { component: 'Bridge' });
+  logInfo(`Exposing 'codemode' and 'sandbox_status' tools`, { component: 'Bridge' });
 
   // Also handle stdin close events for stdio transport
   process.stdin.on('end', shutdown);

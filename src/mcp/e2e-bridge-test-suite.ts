@@ -156,7 +156,7 @@ async function createBridgePipeline(upstreamClient: Client, serverName: string, 
   const bridgeServer = new McpServer({ name: 'codemode-bridge-test', version: '1.0.0' });
 
   bridgeServer.registerTool(
-    'eval',
+    'sandbox_eval_js',
     {
       description: evalDescription,
       inputSchema: z.object({
@@ -201,7 +201,7 @@ async function callCodemode(
   client: Client,
   code: string,
 ): Promise<{ code: string; result: any; logs?: string[] }> {
-  const response = await client.callTool({ name: 'eval', arguments: { code } });
+  const response = await client.callTool({ name: 'sandbox_eval_js', arguments: { code } });
 
   const content = (response as any).content;
   if (!content || !Array.isArray(content) || content.length === 0) {
@@ -284,7 +284,7 @@ export function createE2EBridgeTestSuite(
       testOrSkip('should expose a single codemode tool', async () => {
         const { tools } = await client.listTools();
         expect(tools).toHaveLength(1);
-        expect(tools[0].name).toBe('eval');
+        expect(tools[0].name).toBe('sandbox_eval_js');
       });
 
       testOrSkip('should have code input schema', async () => {
@@ -452,7 +452,7 @@ export function createE2EBridgeTestSuite(
     describe('Error Handling', () => {
       testOrSkip('should handle code execution errors gracefully', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { throw new Error("boom"); }' },
         });
         const text = (response as any).content?.[0]?.text || '';
@@ -461,7 +461,7 @@ export function createE2EBridgeTestSuite(
 
       testOrSkip('should handle syntax errors in user code', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { this is not valid javascript!!! }' },
         });
         const text = (response as any).content?.[0]?.text || '';
@@ -489,7 +489,7 @@ export function createE2EBridgeTestSuite(
 
       testOrSkip('should handle calling non-existent tools', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { return await codemode.test__nonexistent({}); }' },
         });
         const text = (response as any).content?.[0]?.text || '';
@@ -559,7 +559,7 @@ export function createE2EBridgeTestSuite(
     describe('Isolation', () => {
       testOrSkip('should not allow require access', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { return require("node:fs"); }' },
         });
         const text = (response as any).content?.[0]?.text || '';
@@ -568,7 +568,7 @@ export function createE2EBridgeTestSuite(
 
       testOrSkip('should not allow process access', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { return process.env; }' },
         });
         const text = (response as any).content?.[0]?.text || '';
@@ -591,7 +591,7 @@ export function createE2EBridgeTestSuite(
     describe('Response Format', () => {
       testOrSkip('should return well-formed MCP content', async () => {
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code: 'async () => { return { answer: 42 }; }' },
         });
 
@@ -611,7 +611,7 @@ export function createE2EBridgeTestSuite(
       testOrSkip('should include code field echoing the input', async () => {
         const code = 'async () => { return "test"; }';
         const response = await client.callTool({
-          name: 'eval',
+          name: 'sandbox_eval_js',
           arguments: { code },
         });
 

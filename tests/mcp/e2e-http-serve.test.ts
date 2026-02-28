@@ -74,7 +74,7 @@ async function callEval(
   client: Client,
   code: string,
 ): Promise<{ code: string; result: any; logs?: string[] }> {
-  const response = await client.callTool({ name: 'eval', arguments: { code } });
+  const response = await client.callTool({ name: 'sandbox_eval_js', arguments: { code } });
   const content = (response as any).content;
   if (!content || !Array.isArray(content) || content.length === 0) {
     throw new Error(`Unexpected response shape: ${JSON.stringify(response)}`);
@@ -153,10 +153,10 @@ describe('HTTP Serve Mode E2E', () => {
 
   // ── 2. Single client: list tools ─────────────────────────────────────────
 
-  it('should expose the "eval" tool in the tool list', async () => {
+  it('should expose the "sandbox_eval_js" tool in the tool list', async () => {
     const { tools } = await sharedClient.listTools();
     const toolNames = tools.map((t) => t.name);
-    expect(toolNames).toContain('eval');
+    expect(toolNames).toContain('sandbox_eval_js');
   });
 
   // ── 3. Single client: basic eval ─────────────────────────────────────────
@@ -198,7 +198,7 @@ describe('HTTP Serve Mode E2E', () => {
 
   it('should return an error response (not crash) when eval code throws', async () => {
     const response = await sharedClient.callTool({
-      name: 'eval',
+      name: 'sandbox_eval_js',
       arguments: { code: 'async () => { throw new Error("intentional test error"); }' },
     });
 
