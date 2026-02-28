@@ -305,4 +305,83 @@ describe('HTTP Serve Mode E2E', () => {
       await clientC.close().catch(() => {});
     }
   });
+
+  // ── 10. Utils virtual server ──────────────────────────────────────────────
+  //
+  // The `utils` virtual server is registered at startup (no upstream MCP
+  // connection needed). Tests 10a–10d verify the two YAML tools and that the
+  // server appears in sandbox_get_functions discovery output.
+
+  // ── 10a. Parse valid YAML ─────────────────────────────────────────────────
+
+  it('should parse a valid YAML string into a JavaScript object via utils__yaml__parse', async () => {
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const raw = await codemode.utils__yaml__parse({ input: "key: value\\nlist:\\n  - 1\\n  - 2" });
+        // The tool returns { content: [{ text: JSON.stringify(result) }], structuredContent: { result } }
+        const parsed = raw.structuredContent.result;
+        return { type: "json", value: parsed };
+      }`,
+    );
+
+    expect(output.result).toEqual({ key: 'value', list: [1, 2] });
+  });
+
+  // ── 10b. Stringify object to YAML ─────────────────────────────────────────
+
+  it('should serialize a JavaScript object to a YAML string via utils__yaml__stringify', async () => {
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const raw = await codemode.utils__yaml__stringify({ input: { key: "value", count: 42 } });
+        // The tool returns the YAML string directly as content[0].text
+        const yamlString = raw.content[0].text;
+        return { type: "json", value: yamlString };
+      }`,
+    );
+
+    expect(typeof output.result).toBe('string');
+    expect(output.result.length).toBeGreaterThan(0);
+    expect(output.result).toContain('key:');
+    expect(output.result).toContain('value');
+    expect(output.result).toContain('42');
+  });
+
+  // ── 10c. Invalid YAML returns error ───────────────────────────────────────
+
+  it('should return an error response when utils__yaml__parse receives invalid YAML', async () => {
+    // Call the tool via eval and surface the error information to the caller.
+    // The descriptor's execute() returns { content: [...], isError: true } for
+    // invalid input; the eval script wraps that response object as JSON so we
+    // can inspect it without the outer MCP error machinery swallowing it.
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const raw = await codemode.utils__yaml__parse({ input: "invalid: yaml: :" });
+        return { type: "json", value: { isError: raw.isError, text: raw.content[0].text } };
+      }`,
+    );
+
+    expect(output.result.isError).toBe(true);
+    expect(output.result.text).toMatch(/YAML parse error/i);
+  });
+
+  // ── 10d. Utils tools appear in sandbox_get_functions ─────────────────────
+
+  it('should list utils__yaml__parse and utils__yaml__stringify in sandbox_get_functions', async () => {
+    // Call the discovery tool directly (not via eval) with a server filter.
+    const response = await sharedClient.callTool({
+      name: 'sandbox_get_functions',
+      arguments: { server: 'utils' },
+    });
+
+    const content = (response as any).content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content.length).toBeGreaterThan(0);
+
+    const text: string = content[0].text;
+    expect(text).toContain('utils__yaml__parse');
+    expect(text).toContain('utils__yaml__stringify');
+  });
 });

@@ -22,6 +22,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
+import * as jsYaml from "js-yaml";
 import { generateTypes, normalizeCode, sanitizeToolName } from "./schema-utils.js";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
@@ -412,6 +413,75 @@ function registerDiscoveryTools(
   );
 }
 
+// ── Utils virtual server registration ─────────────────────────────────────
+
+/**
+ * Register the built-in `utils` virtual server on the given ServerManager.
+ * All tools run in-process — no upstream MCP connection is created.
+ */
+function registerUtilsServer(serverManager: ServerManager): void {
+  const yamlParseDescriptor: ToolDescriptor = {
+    description: "Parse a YAML string into a JavaScript value",
+    inputSchema: z.object({ input: z.string().describe("YAML string to parse") }),
+    rawSchema: {
+      type: "object",
+      properties: {
+        input: { type: "string", description: "YAML string to parse" },
+      },
+      required: ["input"],
+    },
+    outputSchema: z.object({ result: z.unknown() }),
+    execute: async (args: { input: string }) => {
+      try {
+        const result = jsYaml.load(args.input, { schema: jsYaml.CORE_SCHEMA });
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          structuredContent: { result },
+        };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: `YAML parse error: ${message}` }],
+          isError: true,
+        };
+      }
+    },
+  };
+
+  const yamlStringifyDescriptor: ToolDescriptor = {
+    description: "Serialize a JavaScript value to a YAML string",
+    inputSchema: z.object({ input: z.unknown().describe("Value to serialize to YAML") }),
+    rawSchema: {
+      type: "object",
+      properties: {
+        input: { description: "Value to serialize to YAML" },
+      },
+      required: ["input"],
+    },
+    outputSchema: z.object({ result: z.string() }),
+    execute: async (args: { input: unknown }) => {
+      try {
+        const result = jsYaml.dump(args.input, { schema: jsYaml.CORE_SCHEMA });
+        return {
+          content: [{ type: "text" as const, text: result }],
+          structuredContent: { result },
+        };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: `YAML stringify error: ${message}` }],
+          isError: true,
+        };
+      }
+    },
+  };
+
+  serverManager.registerServer("utils", {
+    "utils__yaml__parse": yamlParseDescriptor,
+    "utils__yaml__stringify": yamlStringifyDescriptor,
+  });
+}
+
 export interface StartServerOptions {
   serverConfigs: MCPServerConfig[];
   executorType?: ExecutorType;
@@ -453,6 +523,9 @@ export async function startCodeModeBridgeServer(
 
   // ── Connect all upstream servers via ServerManager ─────────────────────────
   const serverManager = new ServerManager();
+
+  // Register built-in virtual servers before connecting real upstream servers
+  registerUtilsServer(serverManager);
 
   await Promise.all(
     serverConfigs.map((config) => serverManager.connectServer(config.name, config))

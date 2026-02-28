@@ -13,11 +13,12 @@ import { sanitizeToolName, jsonSchemaToZod } from "./schema-utils.js";
 
 /**
  * A single upstream server connection with its resolved tools.
+ * `client` is optional/null for virtual servers that have no real upstream connection.
  */
 export interface ManagedServer {
   name: string;
   config: MCPServerConfig;
-  client: MCPClient;
+  client?: MCPClient | null;
   /** Namespaced tool descriptors keyed by "<serverName>__<toolName>" */
   tools: Record<string, ToolDescriptor>;
 }
@@ -72,6 +73,24 @@ export class ServerManager {
   }
 
   /**
+   * Register a virtual server directly with pre-built ToolDescriptors.
+   * No upstream MCP connection is established — useful for built-in utility
+   * tools that run in-process (e.g. the `utils` server).
+   */
+  public registerServer(
+    name: string,
+    tools: Record<string, ToolDescriptor>
+  ): void {
+    this.servers.set(name, {
+      name,
+      config: { type: 'stdio', command: '', args: [] } as any, // sentinel — no real connection
+      client: null,
+      tools,
+    });
+    logInfo(`Registered virtual server "${name}" (${Object.keys(tools).length} tool${Object.keys(tools).length !== 1 ? 's' : ''})`, { component: 'ServerManager' });
+  }
+
+  /**
    * Disconnect from a single upstream server and remove it from the registry.
    */
   async disconnectServer(name: string): Promise<void> {
@@ -79,7 +98,7 @@ export class ServerManager {
     if (!managed) return;
 
     try {
-      await managed.client.close();
+      await managed.client?.close();
     } catch (error) {
       logDebug(
         `Error closing client for "${name}": ${error instanceof Error ? error.message : String(error)}`,
