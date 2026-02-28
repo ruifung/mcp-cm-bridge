@@ -65,16 +65,15 @@ export class DenoExecutor extends RemoteExecutorBase {
       '--deny-net',
       '--deny-write',
       '--deny-run',
-      '--allow-env=CODEMODE_WORKER_PATH',
+      '--deny-env',
       '--deny-sys',
       '--deny-ffi',
     ];
 
-    args.push(scripts.runner);
+    args.push(scripts.runner, '--no-heartbeat', '--worker-path=' + scripts.worker);
 
     this.process = spawn(this.denoPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CODEMODE_WORKER_PATH: scripts.worker },
     });
 
     this.process.stderr?.on('data', (data: Buffer) => {

@@ -1,4 +1,4 @@
-import type { Executor, ExecuteResult } from '@cloudflare/codemode';
+import type { Executor, ExecuteResult } from './types.js';
 // @ts-ignore - isolated-vm is an optional dependency; this file is only loaded via dynamic import() when available
 import ivm from 'isolated-vm';
 import { wrapCode } from './wrap-code.js';

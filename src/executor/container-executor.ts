@@ -6,7 +6,7 @@
  * is unavailable or fails to initialize.
  */
 
-import type { Executor, ExecuteResult } from '@cloudflare/codemode';
+import type { Executor, ExecuteResult } from './types.js';
 import { ContainerSocketExecutor, type ContainerSocketExecutorOptions } from './container-socket-executor.js';
 import { ContainerCliExecutor, type ContainerCliExecutorOptions } from './container-cli-executor.js';
 import { logDebug, logInfo, logError } from '../utils/logger.js';

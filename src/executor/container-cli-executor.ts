@@ -80,7 +80,7 @@ export class ContainerCliExecutor extends RemoteExecutorBase {
     // Fixed Deno defaults — container always runs Deno
     this.image = options.image ?? 'denoland/deno:debian';
     this.containerUser = options.user ?? '1000';
-    this.containerCommand = options.command ?? ['deno', 'run', '--allow-read', '--allow-env=CODEMODE_WORKER_PATH', '--allow-net=none'];
+    this.containerCommand = options.command ?? ['deno', 'run', '--allow-read', '--deny-env', '--allow-net=none'];
 
     logDebug(`[ContainerCliExecutor] Initialized with image: ${this.image}`, { component: 'Executor' });
   }
@@ -156,11 +156,10 @@ export class ContainerCliExecutor extends RemoteExecutorBase {
       '-v', `${scripts.runner}:/app/container-runner.ts:ro`,  // mount runner script
       '-v', `${scripts.worker}:/app/container-worker.ts:ro`,  // mount worker script
       '-w', '/app',
-      '-e', 'CODEMODE_WORKER_PATH=/app/container-worker.ts',
       '--label', `codemode.host-pid=${process.pid}`,
       '--label', `codemode.created-at=${new Date().toISOString()}`,
       this.image,
-      ...this.containerCommand, '/app/container-runner.ts',
+      ...this.containerCommand, '/app/container-runner.ts', '--no-heartbeat', '--worker-path=/app/container-worker.ts',
     ];
 
     logDebug('[Executor:CLI] Creating container...', { component: 'Executor' });

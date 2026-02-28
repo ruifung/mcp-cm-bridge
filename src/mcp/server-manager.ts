@@ -9,7 +9,7 @@
 
 import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
 import { logDebug, logError, logInfo } from "../utils/logger.js";
-import { jsonSchemaToZod } from "./server.js";
+import { sanitizeToolName, jsonSchemaToZod } from "./schema-utils.js";
 
 /**
  * A single upstream server connection with its resolved tools.
@@ -28,6 +28,8 @@ export interface ManagedServer {
 export interface ToolDescriptor {
   description: string;
   inputSchema: any; // Zod schema
+  /** Original JSON Schema from the upstream MCP server, before Zod conversion. */
+  rawSchema: any;
   execute: (args: any) => Promise<any>;
 }
 
@@ -126,6 +128,48 @@ export class ServerManager {
     }));
   }
 
+  /**
+   * Look up a single tool descriptor by its name as returned by getToolList()
+   * (the sanitized callable form, e.g. "gitlab__list_projects").
+   * Returns undefined if no tool with that name is registered.
+   */
+  getToolByName(name: string): ToolDescriptor | undefined {
+    for (const managed of this.servers.values()) {
+      for (const [namespacedName, descriptor] of Object.entries(managed.tools)) {
+        if (sanitizeToolName(namespacedName) === name) {
+          return descriptor;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Return a flat list of all tools, optionally filtered by server name.
+   * Each entry includes the server name, the sanitized callable name
+   * (as used in eval code), and the tool description.
+   */
+  getToolList(
+    serverName?: string
+  ): Array<{ server: string; name: string; description: string }> {
+    const results: Array<{ server: string; name: string; description: string }> = [];
+
+    for (const managed of this.servers.values()) {
+      if (serverName !== undefined && managed.name !== serverName) {
+        continue;
+      }
+      for (const [namespacedName, descriptor] of Object.entries(managed.tools)) {
+        results.push({
+          server: managed.name,
+          name: sanitizeToolName(namespacedName),
+          description: descriptor.description,
+        });
+      }
+    }
+
+    return results;
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
@@ -136,9 +180,11 @@ export class ServerManager {
     toolName: string,
     serverName: string
   ): ToolDescriptor {
+    const rawSchema = toolDef.inputSchema ?? {};
     return {
       description: toolDef.description || "",
       inputSchema: jsonSchemaToZod(toolDef.inputSchema),
+      rawSchema,
       execute: async (args: any) => {
         logDebug(`Calling tool: ${serverName}__${toolName}`, {
           component: 'Tool Execution',

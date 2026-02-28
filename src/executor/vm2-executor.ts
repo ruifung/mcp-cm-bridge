@@ -4,7 +4,7 @@
  */
 
 import { VM } from "vm2";
-import type { Executor, ExecuteResult } from "@cloudflare/codemode";
+import type { Executor, ExecuteResult } from './types.js';
 import { wrapCode } from "./wrap-code.js";
 
 /**

@@ -83,8 +83,13 @@ process.stderr.write('[container-runner] Starting...\n');
 
 const __filename: string = fileURLToPath(import.meta.url);
 const __dirname: string = dirname(__filename);
-const WORKER_PATH: string =
-  process.env['CODEMODE_WORKER_PATH'] ?? join(__dirname, 'container-worker.ts');
+
+// Worker path may be supplied via --worker-path=<path> CLI arg; falls back to
+// a sibling container-worker.ts resolved relative to this script.
+const workerPathArg: string | undefined = process.argv
+  .find(a => a.startsWith('--worker-path='))
+  ?.slice('--worker-path='.length);
+const WORKER_PATH: string = workerPathArg ?? join(__dirname, 'container-worker.ts');
 
 // ── Active worker state ─────────────────────────────────────────────
 
@@ -258,15 +263,24 @@ process.stderr.write('[container-runner] Sending ready signal...\n');
 send({ type: 'ready' });
 process.stderr.write('[container-runner] Ready signal sent\n');
 
-// Start heartbeat watchdog — if host stops sending heartbeats, self-terminate
-heartbeatWatchdog = setInterval(() => {
-  const elapsed: number = Date.now() - lastHeartbeat;
-  if (elapsed > HEARTBEAT_TIMEOUT_MS) {
-    process.stderr.write(`[container-runner] No heartbeat from host for ${elapsed}ms, self-terminating\n`);
-    if (activeWorker) {
-      try { activeWorker.terminate(); } catch { /* ignore */ }
+// Allow callers to opt-out of the heartbeat watchdog via --no-heartbeat flag.
+// When disabled the subprocess still runs normally but will not self-terminate
+// due to missed heartbeats.
+const noHeartbeat: boolean = process.argv.includes('--no-heartbeat');
+
+if (noHeartbeat) {
+  process.stderr.write('[container-runner] Heartbeat watchdog disabled (--no-heartbeat)\n');
+} else {
+  // Start heartbeat watchdog — if host stops sending heartbeats, self-terminate
+  heartbeatWatchdog = setInterval(() => {
+    const elapsed: number = Date.now() - lastHeartbeat;
+    if (elapsed > HEARTBEAT_TIMEOUT_MS) {
+      process.stderr.write(`[container-runner] No heartbeat from host for ${elapsed}ms, self-terminating\n`);
+      if (activeWorker) {
+        try { activeWorker.terminate(); } catch { /* ignore */ }
+      }
+      clearInterval(heartbeatWatchdog!);
+      process.exit(1);
     }
-    clearInterval(heartbeatWatchdog!);
-    process.exit(1);
-  }
-}, 5_000); // check every 5 seconds
+  }, 5_000); // check every 5 seconds
+}

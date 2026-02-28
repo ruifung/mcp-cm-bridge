@@ -3,10 +3,16 @@
  * Selects the best available executor (isolated-vm → container → vm2)
  */
 
-import type { Executor } from "@cloudflare/codemode";
+import type { Executor } from '../executor/types.js';
 import { logInfo, logDebug } from "../utils/logger.js";
 import { isDeno } from "../utils/env.js";
 import { resolveDockerSocketPath } from '../utils/docker.js';
+
+// Resolve isolated-vm's entry point via ESM module resolution (honours the actual
+// package manager layout — works with npm, pnpm, Yarn PnP, monorepos, etc.).
+// import.meta.resolve() resolves relative to this file, not the process cwd,
+// so it is correct regardless of where the bridge process is launched from.
+const _ivmFileUrl = import.meta.resolve('isolated-vm');
 
 // ── Executor type ───────────────────────────────────────────────────
  
@@ -63,15 +69,21 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
   try {
     // Run the check in a separate process because isolated-vm can cause 
     // segmentation faults if native dependencies or environment are incompatible.
-    const checkScript = `
-      import ivm from 'isolated-vm';
-      const isolate = new ivm.Isolate({ memoryLimit: 8 });
-      isolate.dispose();
-      process.exit(0);
-    `;
+    const checkScript = [
+      `import ivm from '${_ivmFileUrl}';`,
+      "const isolate = new ivm.Isolate({ memoryLimit: 8 });",
+      "isolate.dispose();",
+      "process.exit(0);",
+    ].join(" ");
     
     const { execSync } = await import('node:child_process');
-    execSync(`node -e "${checkScript.replace(/"/g, '\\"').replace(/\n/g, '')}"`, { stdio: 'ignore', timeout: 5000 });
+    execSync(
+      `"${process.execPath}" --input-type=module -e "${checkScript.replace(/"/g, '\\"')}"`,
+      {
+        stdio: 'ignore',
+        timeout: 5000,
+      }
+    );
     
     logDebug('isolated-vm is available and functional (verified via subprocess)', { component: 'Executor' });
     _isolatedVmAvailable = true;

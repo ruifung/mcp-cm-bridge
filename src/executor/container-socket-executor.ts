@@ -81,7 +81,7 @@ export class ContainerSocketExecutor extends RemoteExecutorBase {
     // Fixed Deno defaults — container always runs Deno
     this.image = options.image ?? 'denoland/deno:debian';
     this.containerUser = options.user ?? '1000';
-    this.containerCommand = options.command ?? ['deno', 'run', '--allow-read', '--allow-env=CODEMODE_WORKER_PATH', '--allow-net=none'];
+    this.containerCommand = options.command ?? ['deno', 'run', '--allow-read', '--deny-env', '--allow-net=none'];
 
     logDebug(`[ContainerExecutor] Initialized with image: ${this.image}`, { component: 'Executor' });
   }
@@ -144,8 +144,8 @@ export class ContainerSocketExecutor extends RemoteExecutorBase {
       this.container = await this.docker.createContainer({
         name: containerName,
         Image: this.image,
-        Cmd: [...this.containerCommand, '/app/container-runner.ts'],
-        Env: ['CODEMODE_WORKER_PATH=/app/container-worker.ts'],
+        Cmd: [...this.containerCommand, '/app/container-runner.ts', '--no-heartbeat', '--worker-path=/app/container-worker.ts'],
+        Env: [],
         User: this.containerUser,
         OpenStdin: true,
         Labels: {

@@ -1,225 +1,64 @@
 /**
  * MCP Server - Exposes the Code Mode bridge as an MCP server
- * 
+ *
  * Architecture:
  * - Upstream: Use official MCP SDK's Client to connect to and collect tools from other MCP servers
- * - Orchestration: Pass collected tools to codemode SDK's createCodeTool()
+ * - Orchestration: Inline eval-tool logic using normalizeCode + executor.execute()
  * - Downstream: Use MCP SDK to expose the codemode tool via MCP protocol (stdio or HTTP transport)
- * 
+ *
  * This server:
  * 1. Connects to upstream MCP servers using official MCP SDK Client
  * 2. Collects tools from all upstream servers in native MCP format (JSON Schema)
  * 3. Converts tools to ToolDescriptor format (with Zod schemas)
- * 4. Uses @cloudflare/codemode SDK to create the "codemode" tool with those tools
- * 5. Adapts the codemode SDK's AI SDK Tool to MCP protocol using a shim layer
- * 6. Exposes the "codemode" tool via MCP protocol downstream
- * 7. Watches mcp.json for changes and hot-reloads upstream connections (live reload)
+ * 4. Registers the "eval" tool directly on McpServer using normalizeCode + executor.execute()
+ * 5. Exposes the "eval" tool via MCP protocol downstream
+ * 6. Watches mcp.json for changes and hot-reloads upstream connections (live reload)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
-import { createCodeTool } from "@cloudflare/codemode/ai";
-import type { Executor } from "@cloudflare/codemode";
+import { generateTypes, normalizeCode, sanitizeToolName } from "./schema-utils.js";
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
-import { adaptAISDKToolToMCP, createSessionAwareToolHandler, type ExecutorResolver } from "./mcp-adapter.js";
 import { SessionResolver } from "./session-resolver.js";
-import type { RegisteredTool } from "./mcp-adapter.js";
-import { MCPClient, type MCPServerConfig, type MCPTool } from "./mcp-client.js";
+import type { ToolDescriptor } from "./server-manager.js";
+import { type MCPServerConfig } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
 import { ServerManager } from "./server-manager.js";
 import { ConfigWatcher } from "./config-watcher.js";
 import { tokenPersistence } from "./token-persistence.js";
 import { loadMCPConfigFile } from "./config.js";
+import { BM25SearchProvider, buildSearchEntries } from "./tool-search.js";
 
 // Re-export MCPServerConfig and ExecutorType for backwards compatibility
 export type { MCPServerConfig, ExecutorType }
+// Re-export jsonSchemaToZod for backwards compatibility (moved to schema-utils.ts)
+export { jsonSchemaToZod } from "./schema-utils.js";
 
 /**
- * Convert JSON Schema to Zod schema
- * MCP tools use JSON Schema, but createCodeTool expects Zod schemas
+ * Short, static description for the eval tool.
+ * Discovery tools (get_tools, search_tools, get_tool_schema) let the LLM
+ * find the correct callable name and parameter types before writing code.
  */
-export function jsonSchemaToZod(schema: any): z.ZodType<any> {
-  // Handle null/undefined
-  if (!schema) {
-    return z.object({}).strict();
-  }
+const EVAL_TOOL_DESCRIPTION = `Execute JavaScript/TypeScript code in a sandboxed environment.
 
-  // Handle object type
-  if (schema.type === "object" || !schema.type) {
-    const props: Record<string, z.ZodType<any>> = {};
-    
-    if (schema.properties) {
-      for (const [key, prop] of Object.entries(schema.properties)) {
-        props[key] = jsonSchemaToZod(prop as any);
-      }
-    }
+## Usage
+Write the body of an async function using the \`codemode\` object to call tools:
+  const result = await codemode.toolName({ param: "value" });
+  return result;
 
-    if (schema.required && Array.isArray(schema.required)) {
-      const required = new Set(schema.required);
-      const finalProps: Record<string, z.ZodType<any>> = {};
-      
-      for (const [key, zodSchema] of Object.entries(props)) {
-        if (required.has(key)) {
-          finalProps[key] = zodSchema;
-        } else {
-          finalProps[key] = (zodSchema as any).optional();
-        }
-      }
-      return z.object(finalProps).strict();
-    }
-    
-    // Make all fields optional if no required list
-    const optionalProps: Record<string, z.ZodType<any>> = {};
-    for (const [key, zodSchema] of Object.entries(props)) {
-      optionalProps[key] = (zodSchema as any).optional();
-    }
-    return z.object(optionalProps).strict();
-  }
+You may also pass a complete async arrow function expression if preferred.
 
-  // Handle array type
-  if (schema.type === "array") {
-    const itemSchema = schema.items ? jsonSchemaToZod(schema.items) : z.any();
-    let arraySchema = z.array(itemSchema);
-    
-    // Apply array constraints
-    if (typeof schema.minItems === "number") {
-      arraySchema = arraySchema.min(schema.minItems);
-    }
-    if (typeof schema.maxItems === "number") {
-      arraySchema = arraySchema.max(schema.maxItems);
-    }
-    
-    return arraySchema;
-  }
-
-  // Handle string type
-  if (schema.type === "string") {
-    let stringSchema = z.string();
-    
-    // Handle enum
-    if (schema.enum && Array.isArray(schema.enum)) {
-      return z.enum(schema.enum as [string, ...string[]]);
-    }
-    
-    // Apply string format constraints
-    if (schema.format) {
-      switch (schema.format) {
-        case "email":
-          stringSchema = stringSchema.email();
-          break;
-        case "uuid":
-          stringSchema = stringSchema.uuid();
-          break;
-        case "url":
-          stringSchema = stringSchema.url();
-          break;
-        case "date-time":
-          stringSchema = stringSchema.datetime();
-          break;
-      }
-    }
-    
-    // Apply string length constraints
-    if (typeof schema.minLength === "number") {
-      stringSchema = stringSchema.min(schema.minLength);
-    }
-    if (typeof schema.maxLength === "number") {
-      stringSchema = stringSchema.max(schema.maxLength);
-    }
-    if (schema.pattern) {
-      stringSchema = stringSchema.regex(new RegExp(schema.pattern));
-    }
-    
-    return stringSchema;
-  }
-
-  // Handle number type
-  if (schema.type === "number") {
-    let numberSchema = z.number();
-    
-    // Apply number constraints
-    if (typeof schema.minimum === "number") {
-      numberSchema = numberSchema.min(schema.minimum);
-    }
-    if (typeof schema.maximum === "number") {
-      numberSchema = numberSchema.max(schema.maximum);
-    }
-    if (typeof schema.multipleOf === "number") {
-      numberSchema = numberSchema.multipleOf(schema.multipleOf);
-    }
-    
-    return numberSchema;
-  }
-
-  // Handle integer type
-  if (schema.type === "integer") {
-    let intSchema = z.number().int();
-    
-    // Apply number constraints
-    if (typeof schema.minimum === "number") {
-      intSchema = intSchema.min(schema.minimum);
-    }
-    if (typeof schema.maximum === "number") {
-      intSchema = intSchema.max(schema.maximum);
-    }
-    if (typeof schema.multipleOf === "number") {
-      intSchema = intSchema.multipleOf(schema.multipleOf);
-    }
-    
-    return intSchema;
-  }
-
-  // Handle boolean type
-  if (schema.type === "boolean") {
-    return z.boolean();
-  }
-
-  // Handle null type
-  if (schema.type === "null") {
-    return z.null();
-  }
-
-  // Handle anyOf (union types)
-  if (schema.anyOf && Array.isArray(schema.anyOf)) {
-    const schemas = schema.anyOf.map((s: any) => jsonSchemaToZod(s));
-    return z.union(schemas as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
-  }
-
-  // Handle oneOf (discriminated union)
-  if (schema.oneOf && Array.isArray(schema.oneOf)) {
-    const schemas = schema.oneOf.map((s: any) => jsonSchemaToZod(s));
-    return z.union(schemas as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
-  }
-
-  // Handle allOf (intersection types)
-  if (schema.allOf && Array.isArray(schema.allOf)) {
-    // Zod doesn't have native intersection for objects, so merge them
-    let merged: z.ZodType<any> = z.object({});
-    for (const subSchema of schema.allOf) {
-      const zodSchema = jsonSchemaToZod(subSchema);
-      merged = (merged as any).and(zodSchema);
-    }
-    return merged;
-  }
-
-  // Handle enum for non-string types
-  if (schema.enum && Array.isArray(schema.enum)) {
-    if (schema.enum.length === 1) {
-      return z.literal(schema.enum[0]);
-    }
-    // Create union of literals
-    const literals = schema.enum.map((val: any) => z.literal(val));
-    return z.union(literals as [z.ZodType<any>, z.ZodType<any>, ...z.ZodType<any>[]]);
-  }
-
-  // Default to any
-  return z.any();
-}
+## Discovering available tools
+Use the \`name\` field returned by discovery tools as the property on \`codemode\`:
+- \`search_tools\` — find tools by keyword
+- \`get_tools\` — list tools by server
+- \`get_tool_schema\` — get the TypeScript type definition for a specific tool`;
 
 // ── Shared status tool registration ───────────────────────────────────────
 
@@ -235,8 +74,8 @@ function registerStatusTool(
       inputSchema: z.object({}).strict(),
     },
     async () => {
-      const servers = serverManager.getServerToolInfo();
-      const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
+      const serverInfo = serverManager.getServerToolInfo();
+      const totalTools = serverInfo.reduce((sum, s) => sum + s.toolCount, 0);
 
       const status = {
         executor: {
@@ -244,12 +83,122 @@ function registerStatusTool(
           reason: executorInfo.reason,
           timeout: executorInfo.timeout,
         },
-        servers,
+        servers: serverInfo.map(({ name, toolCount }) => ({ name, toolCount })),
         totalTools,
       };
 
       return {
         content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+      } as any;
+    }
+  );
+}
+
+// ── Discovery tools registration ───────────────────────────────────────────
+
+/**
+ * Register the three lazy discovery tools on the given McpServer:
+ *   - get_tools: list all tools grouped by server
+ *   - get_tool_schema: get the TypeScript type definition for a specific tool
+ *   - search_tools: keyword-search the tool index
+ *
+ * @param target       The McpServer to register tools on
+ * @param serverManager Source of tool metadata
+ * @param searchProvider The search index (must already be built)
+ * @param schemaCache  A shared cache keyed by namespaced tool name. Populated
+ *                     lazily by get_tool_schema; must be cleared on live-reload.
+ */
+function registerDiscoveryTools(
+  target: McpServer,
+  serverManager: ServerManager,
+  searchProvider: BM25SearchProvider,
+  schemaCache: Map<string, string>
+): void {
+  // ── get_tools ──────────────────────────────────────────────────────────────
+  target.registerTool(
+    "get_tools",
+    {
+      description: "List all available tools grouped by server. Use this to discover what servers and tools are connected to the bridge.",
+      inputSchema: z.object({
+        server: z.string().optional().describe("Server name to filter by. Omit to list all servers."),
+      }).strict(),
+    },
+    async (args) => {
+      const flat = serverManager.getToolList(args.server);
+
+      // Group by server
+      const grouped = new Map<string, Array<{ name: string; description: string }>>();
+      for (const entry of flat) {
+        if (!grouped.has(entry.server)) {
+          grouped.set(entry.server, []);
+        }
+        grouped.get(entry.server)!.push({
+          name: entry.name,
+          description: entry.description,
+        });
+      }
+
+      const result = Array.from(grouped.entries()).map(([serverName, tools]) => ({
+        server: serverName,
+        tools,
+      }));
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      } as any;
+    }
+  );
+
+  // ── get_tool_schema ────────────────────────────────────────────────────────
+  target.registerTool(
+    "get_tool_schema",
+    {
+      description: "Get the TypeScript type definition for a specific tool. Use the tool name (e.g. gitlab__list_projects) from get_tools or search_tools.",
+      inputSchema: z.object({
+        tool_name: z.string().describe("Tool name (e.g. gitlab__list_projects)"),
+      }).strict(),
+    },
+    async (args) => {
+      const cached = schemaCache.get(args.tool_name);
+      if (cached !== undefined) {
+        return {
+          content: [{ type: "text" as const, text: cached }],
+        } as any;
+      }
+
+      const descriptor = serverManager.getToolByName(args.tool_name);
+      if (!descriptor) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Tool "${args.tool_name}" not found. Use get_tools to list available tools.`,
+          }],
+        } as any;
+      }
+
+      const snippet = generateTypes({ [args.tool_name]: descriptor });
+      schemaCache.set(args.tool_name, snippet);
+
+      return {
+        content: [{ type: "text" as const, text: snippet }],
+      } as any;
+    }
+  );
+
+  // ── search_tools ───────────────────────────────────────────────────────────
+  target.registerTool(
+    "search_tools",
+    {
+      description: "Search for tools by keyword. Returns matching tools with their names, descriptions, and TypeScript type definitions.",
+      inputSchema: z.object({
+        query: z.string().describe("Search query (keywords matching tool names and descriptions)"),
+        limit: z.number().int().min(1).max(20).optional().describe("Max results to return (default: 5)"),
+      }).strict(),
+    },
+    async (args) => {
+      const results = searchProvider.search(args.query, args.limit ?? 5);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
       } as any;
     }
   );
@@ -316,6 +265,11 @@ export async function startCodeModeBridgeServer(
     }
   }
 
+  // ── Search index + schema cache for discovery tools ───────────────────────
+  const searchProvider = new BM25SearchProvider();
+  searchProvider.build(buildSearchEntries(serverManager));
+  const schemaCache = new Map<string, string>();
+
   // ── Executor ───────────────────────────────────────────────────────────────
   // The singleton executor is always created.  In stdio mode it handles all
   // requests.  In HTTP mode it serves as the fallback when no sessionId is
@@ -340,7 +294,57 @@ export async function startCodeModeBridgeServer(
     },
   });
 
-  const resolveExecutor: ExecutorResolver = (sid) => sessionResolver.resolve(sid);
+  const resolveExecutor = (sid?: string) => sessionResolver.resolve(sid);
+
+  // ── Eval tool schema (static) ─────────────────────────────────────────────
+  const evalInputSchema = z.object({
+    code: z.string().describe("Async arrow function expression to execute"),
+  });
+
+  // ── Eval tool handler factory ─────────────────────────────────────────────
+  // Returns a fresh handler closure whose getDescriptors() captures the current
+  // server state. Called once at registration and again on rebuild so that
+  // live-reload picks up the updated tool set without re-registering.
+  function makeEvalHandler(getDescriptors: () => Record<string, ToolDescriptor>) {
+    return async (args: { code: string }, extra: any) => {
+      const sessionId = extra?.sessionId as string | undefined;
+      const executor = await resolveExecutor(sessionId);
+      const descriptors = getDescriptors();
+
+      const fns: Record<string, (args: unknown) => Promise<unknown>> = {};
+      for (const [name, descriptor] of Object.entries(descriptors)) {
+        fns[sanitizeToolName(name)] = descriptor.execute;
+      }
+
+      const normalizedCode = normalizeCode(args.code);
+      const executeResult = await executor.execute(normalizedCode, fns);
+
+      if (executeResult.error) {
+        const logCtx = executeResult.logs?.length
+          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
+          : "";
+        throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
+      }
+
+      const output: Record<string, unknown> = { code: args.code, result: executeResult.result };
+      if (executeResult.logs?.length) output.logs = executeResult.logs;
+      return { content: [{ type: "text" as const, text: JSON.stringify(output) }] };
+    };
+  }
+
+  // ── registerEvalTool ──────────────────────────────────────────────────────
+  // Registers the eval tool on a McpServer and returns the handle so the
+  // caller can call .update() for live-reload.
+  function registerEvalTool(mcpServer: McpServer): RegisteredTool {
+    return mcpServer.registerTool(
+      "eval",
+      {
+        description: EVAL_TOOL_DESCRIPTION,
+        inputSchema: evalInputSchema,
+      },
+      makeEvalHandler(() => serverManager.getAllToolDescriptors())
+    );
+  }
 
   // ── Per-session eval tool handle map ──────────────────────────────────────
   // Tracks RegisteredTool handles for all active sessions, keyed by session ID.
@@ -354,28 +358,25 @@ export async function startCodeModeBridgeServer(
     const descriptors = serverManager.getAllToolDescriptors();
     const count = Object.keys(descriptors).length;
 
+    // Rebuild search index and clear schema cache so discovery tools reflect
+    // the new tool set after a live-reload.
+    searchProvider.rebuild(buildSearchEntries(serverManager));
+    schemaCache.clear();
+
     logInfo(
       `Rebuilding eval tool with ${count} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
       { component: 'Bridge' }
     );
 
-    // Build a reference tool with the singleton executor just to get the
-    // updated description and inputSchema from createCodeTool.
-    // resolve() with no sessionId always routes to the singleton session,
-    // lazily re-creating it if it was disposed by the idle timer.
-    const singletonForRebuild = await sessionResolver.resolve();
-    const referenceTool = createCodeTool({
-      tools: descriptors,
-      executor: singletonForRebuild,
-    });
-
     // Build the update payload once and apply it to every active session handle.
+    // Description and schema are static; a fresh handler closure is sufficient
+    // to pick up the updated descriptor set.
     // Each handle's .update() call triggers tools/list_changed on that session's
     // connected client — whether stdio or HTTP.
     const updatePayload = {
-      description: referenceTool.description,
-      paramsSchema: referenceTool.inputSchema as any,
-      callback: createSessionAwareToolHandler(resolveExecutor, () => serverManager.getAllToolDescriptors()),
+      description: EVAL_TOOL_DESCRIPTION,
+      paramsSchema: evalInputSchema as any,
+      callback: makeEvalHandler(() => serverManager.getAllToolDescriptors()),
     };
 
     for (const handle of sessionToolHandles.values()) {
@@ -471,20 +472,14 @@ export async function startCodeModeBridgeServer(
     const buildMcpServer = async (): Promise<{ mcpServer: McpServer; registeredEvalTool: RegisteredTool }> => {
       const mcpServer = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
 
-      // Register the eval tool (session-aware: each call resolves its own executor via sessionId)
-      const sessionCodemodeTool = createCodeTool({
-        tools: serverManager.getAllToolDescriptors(),
-        executor: initialExecutor, // placeholder; actual executor resolved per-call via sessionId
-      });
-      const registeredEvalTool = await adaptAISDKToolToMCP(
-        mcpServer,
-        sessionCodemodeTool,
-        resolveExecutor,
-        () => serverManager.getAllToolDescriptors()
-      );
+      // Register the eval tool directly (session-aware: each call resolves its own executor via sessionId)
+      const registeredEvalTool = registerEvalTool(mcpServer);
 
       // Register the status tool
       registerStatusTool(mcpServer, executorInfo, serverManager);
+
+      // Register the discovery tools
+      registerDiscoveryTools(mcpServer, serverManager, searchProvider, schemaCache);
 
       return { mcpServer, registeredEvalTool };
     };
@@ -495,25 +490,18 @@ export async function startCodeModeBridgeServer(
     const mcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
 
     logInfo(
-      `Creating codemode tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
+      `Creating eval tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
       { component: 'Bridge' }
     );
 
-    const initialCodemodeTool = createCodeTool({
-      tools: allToolDescriptors,
-      executor: initialExecutor,
-    });
-
-    // Adapt the AI SDK Tool to MCP protocol and store the handle for live-reload.
-    const stdioEvalHandle = await adaptAISDKToolToMCP(
-      mcp,
-      initialCodemodeTool,
-      resolveExecutor,
-      () => serverManager.getAllToolDescriptors()
-    );
+    // Register the eval tool directly and store the handle for live-reload.
+    const stdioEvalHandle = registerEvalTool(mcp);
     sessionToolHandles.set('__stdio__', stdioEvalHandle);
 
     registerStatusTool(mcp, executorInfo, serverManager);
+
+    // Register the discovery tools
+    registerDiscoveryTools(mcp, serverManager, searchProvider, schemaCache);
 
     await startStdioTransport(mcp, shutdown, (fn) => { transportCloseFn = fn; });
   }

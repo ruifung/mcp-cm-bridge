@@ -16,7 +16,7 @@ vi.mock('../../src/mcp/mcp-client.js', () => ({
   MCPClient: vi.fn(),
 }));
 
-vi.mock('../../src/mcp/server.js', () => ({
+vi.mock('../../src/mcp/schema-utils.js', () => ({
   jsonSchemaToZod: vi.fn((schema: any) => schema),
 }));
 
@@ -26,10 +26,22 @@ vi.mock('../../src/utils/logger.js', () => ({
   logError: vi.fn(),
 }));
 
+vi.mock('@cloudflare/codemode', () => ({
+  sanitizeToolName: (name: string) => {
+    if (!name) return '_';
+    let s = name.replace(/[-.\s]/g, '_');
+    s = s.replace(/[^a-zA-Z0-9_$]/g, '');
+    if (!s) return '_';
+    if (/^[0-9]/.test(s)) s = '_' + s;
+    return s;
+  },
+  generateTypes: vi.fn((_tools: any) => '/* mocked schema */'),
+}));
+
 import { ServerManager } from '../../src/mcp/server-manager.js';
 import { MCPClient, type MCPServerConfig, type MCPTool } from '../../src/mcp/mcp-client.js';
 import { logDebug, logError, logInfo } from '../../src/utils/logger.js';
-import { jsonSchemaToZod } from '../../src/mcp/server.js';
+import { jsonSchemaToZod } from '../../src/mcp/schema-utils.js';
 
 // ── Type helpers ──────────────────────────────────────────────────────────────
 

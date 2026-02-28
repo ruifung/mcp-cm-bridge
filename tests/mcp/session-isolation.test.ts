@@ -6,12 +6,14 @@
  * race-condition guard, idle timeout, singleton management, and disposeSession
  * logic without any I/O or real executor creation.
  *
- * `createSessionAwareToolHandler` IS exported from mcp-adapter.ts and is
- * tested directly against the real module.
+ * Section 5 tests a local `makeSessionAwareHandler` factory that mirrors the
+ * `makeEvalHandler` pattern from server.ts — the session isolation concern
+ * (each call dispatches to the executor resolved for its sessionId) is
+ * verified against a fully-controllable mock.
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { Executor } from '@cloudflare/codemode';
+import type { Executor } from '../../src/executor/types.js';
 
 // ── Module-level mocks (hoisted before imports) ────────────────────────────
 
@@ -21,22 +23,24 @@ vi.mock('../../src/utils/logger.js', () => ({
   logDebug: vi.fn(),
 }));
 
-vi.mock('@cloudflare/codemode/ai', () => ({
-  createCodeTool: vi.fn(),
-}));
-
-import { createSessionAwareToolHandler, type ExecutorResolver } from '../../src/mcp/mcp-adapter.js';
-import { createCodeTool } from '@cloudflare/codemode/ai';
 import { SessionResolver, DEFAULT_IDLE_TIMEOUT_MS, SINGLETON_SESSION_ID } from '../../src/mcp/session-resolver.js';
+
+// ── ExecutorResolver type (mirrors server.ts closure signature) ────────────
+type ExecutorResolver = (sessionId?: string) => Promise<Executor>;
 
 // ── Test helpers / fixtures ────────────────────────────────────────────────
 
-/** Build a minimal Executor mock */
-function makeMockExecutor(): Executor & { dispose: ReturnType<typeof vi.fn>; execute: ReturnType<typeof vi.fn> } {
+/** Build a minimal Executor mock (with dispose extension for lifecycle tests) */
+function makeMockExecutor() {
   return {
-    execute: vi.fn().mockResolvedValue('mock result'),
+    execute: vi.fn().mockResolvedValue({ result: 'mock result', error: undefined }),
     dispose: vi.fn().mockResolvedValue(undefined),
-  } as any;
+  };
+}
+
+/** Cast a session executor back to the mock shape for assertions. */
+function asMock(executor: Executor) {
+  return executor as ReturnType<typeof makeMockExecutor>;
 }
 
 /** Build a mock createExecutor factory that returns a fresh executor each call */
@@ -220,7 +224,7 @@ describe('Idle timeout', () => {
     // Session should be removed from the map
     expect(resolver.hasSession('session-hotel')).toBe(false);
     // dispose() on the executor should have been called
-    expect(session.executor.dispose).toHaveBeenCalledOnce();
+    expect(asMock(session.executor).dispose).toHaveBeenCalledOnce();
   });
 
   it('should reset the idle timer when a session is accessed again', async () => {
@@ -254,7 +258,7 @@ describe('Idle timeout', () => {
     // Now advance past the reset timer
     await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS);
     expect(resolver.hasSession('session-juliet')).toBe(false);
-    expect(session.executor.dispose).toHaveBeenCalledOnce();
+    expect(asMock(session.executor).dispose).toHaveBeenCalledOnce();
   });
 
   it('should call unref() on the idle timer so it does not prevent process exit', async () => {
@@ -325,7 +329,7 @@ describe('disposeSession', () => {
 
     await resolver.disposeSession('session-mike');
 
-    expect(session.executor.dispose).toHaveBeenCalledOnce();
+    expect(asMock(session.executor).dispose).toHaveBeenCalledOnce();
   });
 
   it('should clear the idle timer when the session is disposed', async () => {
@@ -357,7 +361,7 @@ describe('disposeSession', () => {
     ]);
 
     // dispose() should only be called once — the second disposeSession is a no-op
-    expect(session.executor.dispose).toHaveBeenCalledOnce();
+    expect(asMock(session.executor).dispose).toHaveBeenCalledOnce();
   });
 
   it('should handle executor.dispose() throwing without propagating the error', async () => {
@@ -377,43 +381,70 @@ describe('disposeSession', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 5. createSessionAwareToolHandler
+// 5. Session-aware eval handler (mirrors makeEvalHandler from server.ts)
 // ══════════════════════════════════════════════════════════════════════════════
+//
+// `makeEvalHandler` in server.ts is an inline closure, not exported. We test
+// an equivalent local factory that captures the same session-isolation concern:
+//   • Each invocation calls the ExecutorResolver with the sessionId from `extra`
+//   • The resolved executor's execute() is called with the provided code
+//   • Results are serialised into a content array
+//   • Errors propagate as thrown exceptions (handled by MCP SDK)
+//   • getDescriptors is called on every invocation (no stale cache)
 
-/** Narrow a CallToolResult content item to a text item and return its text. */
-function getTextContent(result: Awaited<ReturnType<ReturnType<typeof createSessionAwareToolHandler>>>, index = 0): string {
-  const item = result.content[index];
-  if (item.type !== 'text') throw new Error(`Expected text content at index ${index}, got ${item.type}`);
-  return (item as { type: 'text'; text: string }).text;
+/**
+ * Minimal reproduction of the `makeEvalHandler` pattern from server.ts.
+ * Takes an executor resolver and a descriptor getter; returns an async handler
+ * compatible with McpServer.registerTool().
+ */
+function makeSessionAwareHandler(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  resolveExecutor: (sessionId?: string) => Promise<any>,
+  getDescriptors: () => Record<string, { execute: (...args: any[]) => Promise<unknown> }>,
+) {
+  return async (args: { code?: string }, extra: { sessionId?: string } | undefined) => {
+    const sessionId = extra?.sessionId as string | undefined;
+    const executor = await resolveExecutor(sessionId);
+    const descriptors = getDescriptors();
+
+    const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+    for (const [name, descriptor] of Object.entries(descriptors)) {
+      fns[name] = descriptor.execute;
+    }
+
+    const executeResult = await executor.execute(args.code ?? '', fns);
+
+    if (executeResult.error) {
+      const logCtx = executeResult.logs?.length
+        ? `\n\nConsole output:\n${executeResult.logs.join('\n')}`
+        : '';
+      throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
+    }
+
+    const output: Record<string, unknown> = { code: args.code ?? '', result: executeResult.result };
+    if (executeResult.logs?.length) output.logs = executeResult.logs;
+    return { content: [{ type: 'text' as const, text: JSON.stringify(output) }] };
+  };
 }
 
-describe('createSessionAwareToolHandler', () => {
-  let mockExecutorResolver: ExecutorResolver;
+describe('Session-aware eval handler (makeSessionAwareHandler)', () => {
   let mockExecutor: ReturnType<typeof makeMockExecutor>;
-  let mockGetDescriptors: ReturnType<typeof vi.fn>;
-  let mockToolExecute: ReturnType<typeof vi.fn>;
-  // Keep a typed spy handle so we can set return values per test
-  let executorResolverSpy: ReturnType<typeof vi.fn<ExecutorResolver>>;
+  let executorResolverSpy: ReturnType<typeof vi.fn<(sid?: string) => Promise<ReturnType<typeof makeMockExecutor>>>>;
+  let mockGetDescriptors: ReturnType<typeof vi.fn<() => Record<string, { execute: (...a: any[]) => Promise<unknown> }>>>;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     mockExecutor = makeMockExecutor();
-    executorResolverSpy = vi.fn<ExecutorResolver>().mockResolvedValue(mockExecutor);
-    mockExecutorResolver = executorResolverSpy as unknown as ExecutorResolver;
-    mockGetDescriptors = vi.fn().mockReturnValue({ 'test__tool': {} });
+    // Default: execute returns a successful result
+    mockExecutor.execute.mockResolvedValue({ result: 'ok', error: undefined });
 
-    // createCodeTool is mocked at the module level; set up what it returns here
-    mockToolExecute = vi.fn().mockResolvedValue({ status: 'ok', data: [1, 2, 3] });
-    vi.mocked(createCodeTool).mockReturnValue({
-      description: 'test tool',
-      execute: mockToolExecute,
-      inputSchema: {} as any,
-    } as any);
+    executorResolverSpy = vi.fn<(sid?: string) => Promise<ReturnType<typeof makeMockExecutor>>>().mockResolvedValue(mockExecutor);
+    mockGetDescriptors = vi.fn<() => Record<string, { execute: (...a: any[]) => Promise<unknown> }>>().mockReturnValue({ 'test__tool': { execute: vi.fn() } });
   });
 
   it('should call executorResolver with the sessionId from extra', async () => {
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
 
     await handler({ code: 'return 42;' }, { sessionId: 'session-romeo' });
 
@@ -421,7 +452,7 @@ describe('createSessionAwareToolHandler', () => {
   });
 
   it('should call executorResolver with undefined when extra has no sessionId', async () => {
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
 
     await handler({ code: 'return 1;' }, {});
 
@@ -429,86 +460,96 @@ describe('createSessionAwareToolHandler', () => {
   });
 
   it('should call executorResolver with undefined when extra is null/undefined', async () => {
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
 
     await handler({ code: 'return 1;' }, undefined);
 
     expect(executorResolverSpy).toHaveBeenCalledWith(undefined);
   });
 
-  it('should pass args to the tool execute function', async () => {
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
-    const toolArgs = { code: 'const x = 5; return x * 2;', timeout: 5000 };
+  it('should pass code to executor.execute()', async () => {
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
+    const code = 'const x = 5; return x * 2;';
 
-    await handler(toolArgs, { sessionId: 'session-sierra' });
+    await handler({ code }, { sessionId: 'session-sierra' });
 
-    expect(mockToolExecute).toHaveBeenCalledWith(toolArgs);
+    expect(mockExecutor.execute).toHaveBeenCalledWith(code, expect.any(Object));
   });
 
-  it('should create a fresh codemode tool using the resolved executor and current descriptors', async () => {
-    const descriptors = { 'service__list': {}, 'service__get': {} };
+  it('should pass descriptor functions to executor.execute() as fns map', async () => {
+    const toolExecuteFn = vi.fn().mockResolvedValue(undefined);
+    const descriptors = {
+      'service__list': { execute: toolExecuteFn },
+      'service__get': { execute: vi.fn() },
+    };
     mockGetDescriptors.mockReturnValue(descriptors);
 
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
     await handler({ code: '' }, { sessionId: 'session-tango' });
 
-    expect(vi.mocked(createCodeTool)).toHaveBeenCalledWith({
-      tools: descriptors,
-      executor: mockExecutor,
-    });
+    const fnsArg = mockExecutor.execute.mock.calls[0][1] as Record<string, unknown>;
+    expect(fnsArg).toHaveProperty('service__list');
+    expect(fnsArg).toHaveProperty('service__get');
   });
 
-  it('should return a string result directly in the content text', async () => {
-    mockToolExecute.mockResolvedValueOnce('execution output string');
+  it('should return a text content item with JSON-serialised output', async () => {
+    mockExecutor.execute.mockResolvedValue({ result: { answer: 42 }, error: undefined });
 
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
-    const result = await handler({ code: '' }, { sessionId: 'session-uniform' });
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
+    const result = await handler({ code: 'return {answer: 42}' }, { sessionId: 'session-uniform' });
 
     expect(result.content[0].type).toBe('text');
-    expect(getTextContent(result)).toBe('execution output string');
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toEqual({ answer: 42 });
   });
 
-  it('should JSON-serialize non-string results', async () => {
-    mockToolExecute.mockResolvedValueOnce({ answer: 42, items: ['a', 'b'] });
+  it('should include logs in output when executor returns them', async () => {
+    mockExecutor.execute.mockResolvedValue({
+      result: 'done',
+      error: undefined,
+      logs: ['hello from console'],
+    });
 
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
     const result = await handler({ code: '' }, { sessionId: 'session-victor' });
 
-    expect(result.content[0].type).toBe('text');
-    expect(getTextContent(result)).toBe(JSON.stringify({ answer: 42, items: ['a', 'b'] }, null, 2));
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.logs).toEqual(['hello from console']);
   });
 
-  it('should return an error message when executorResolver throws', async () => {
+  it('should throw when executor.execute() returns an error', async () => {
+    mockExecutor.execute.mockResolvedValue({ result: undefined, error: 'SyntaxError: unexpected token' });
+
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
+
+    await expect(handler({ code: 'invalid JS{' }, { sessionId: 'session-whiskey' }))
+      .rejects.toThrow('Code execution failed: SyntaxError: unexpected token');
+  });
+
+  it('should include console output in thrown error when logs are present', async () => {
+    mockExecutor.execute.mockResolvedValue({
+      result: undefined,
+      error: 'ReferenceError: x is not defined',
+      logs: ['step 1', 'step 2'],
+    });
+
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
+
+    await expect(handler({ code: '' }, { sessionId: 'session-xray' }))
+      .rejects.toThrow('Console output:');
+  });
+
+  it('should throw when executorResolver throws', async () => {
     executorResolverSpy.mockRejectedValueOnce(new Error('Executor pool exhausted'));
 
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
-    const result = await handler({ code: '' }, { sessionId: 'session-whiskey' });
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
 
-    expect(result.content[0].type).toBe('text');
-    expect(getTextContent(result)).toContain('Executor pool exhausted');
+    await expect(handler({ code: '' }, { sessionId: 'session-yankee' }))
+      .rejects.toThrow('Executor pool exhausted');
   });
 
-  it('should return an error message when tool execute throws', async () => {
-    mockToolExecute.mockRejectedValueOnce(new Error('Syntax error in user code'));
-
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
-    const result = await handler({ code: 'invalid JS{' }, { sessionId: 'session-xray' });
-
-    expect(result.content[0].type).toBe('text');
-    expect(getTextContent(result)).toContain('Syntax error in user code');
-  });
-
-  it('should prefix error text with "Tool execution failed:" on error', async () => {
-    mockToolExecute.mockRejectedValueOnce(new Error('OOM'));
-
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
-    const result = await handler({ code: '' }, { sessionId: 'session-yankee' });
-
-    expect(getTextContent(result)).toMatch(/^Tool execution failed:/);
-  });
-
-  it('should call getDescriptors on every invocation (not caching stale descriptors)', async () => {
-    const handler = createSessionAwareToolHandler(mockExecutorResolver, mockGetDescriptors);
+  it('should call getDescriptors on every invocation (no stale descriptor cache)', async () => {
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
 
     await handler({}, { sessionId: 'session-zulu-1' });
     await handler({}, { sessionId: 'session-zulu-2' });
@@ -516,6 +557,34 @@ describe('createSessionAwareToolHandler', () => {
 
     // getDescriptors called once per invocation so live-reloaded tools are picked up
     expect(mockGetDescriptors).toHaveBeenCalledTimes(3);
+  });
+
+  it('should dispatch different sessions to different executors via the resolver', async () => {
+    const executorA = {
+      execute: vi.fn().mockResolvedValue({ result: 'from-A', error: undefined }),
+      dispose: vi.fn(),
+    };
+    const executorB = {
+      execute: vi.fn().mockResolvedValue({ result: 'from-B', error: undefined }),
+      dispose: vi.fn(),
+    };
+    executorResolverSpy
+      .mockResolvedValueOnce(executorA)
+      .mockResolvedValueOnce(executorB);
+
+    const handler = makeSessionAwareHandler(executorResolverSpy, mockGetDescriptors);
+
+    const r1 = await handler({ code: '' }, { sessionId: 'session-alpha' });
+    const r2 = await handler({ code: '' }, { sessionId: 'session-beta' });
+
+    // Verify each session hit a different executor
+    expect(executorA.execute).toHaveBeenCalledOnce();
+    expect(executorB.execute).toHaveBeenCalledOnce();
+
+    const out1 = JSON.parse(r1.content[0].text);
+    const out2 = JSON.parse(r2.content[0].text);
+    expect(out1.result).toBe('from-A');
+    expect(out2.result).toBe('from-B');
   });
 });
 

@@ -2,15 +2,16 @@
 
 [![npm](https://img.shields.io/npm/v/@ruifung/codemode-bridge)](https://www.npmjs.com/package/@ruifung/codemode-bridge)
 
-An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution. Runs on **Node.js** and **Deno**. Bun is not officially supported — if you need to use Bun, ensure a container runtime (Docker or Podman) or Deno is available in your PATH so the bridge can delegate code execution to a supported executor.
+An MCP (Model Context Protocol) multiplexer that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution. Runs on **Node.js** and **Deno**. Bun is not officially supported — if you need to use Bun, ensure a container runtime (Docker or Podman) or Deno is available in your PATH so the bridge can delegate code execution to a supported executor.
 
 ## Key Features
 
 - **Multi-server bridging**: Connect to multiple upstream MCP servers simultaneously.
 - **Tool aggregation**: Exposes all upstream tools through a single `eval` tool.
-- **Dynamic discovery**: Auto-generated TypeScript type definitions show agents exactly what's available.
+- **Dynamic discovery**: Three built-in discovery tools let agents find and inspect available tools before writing code.
 - **Multi-executor sandbox**: Secure execution via Deno, isolated-vm, Docker/Podman containers, or vm2.
 - **Automatic detection**: Automatically selects the best available executor for your environment.
+- **Live reload**: Watches `mcp.json` for changes and hot-reloads upstream connections without restarting.
 - **CLI management**: Easy command-line interface for server configuration.
 
 ## Quick Start
@@ -38,6 +39,34 @@ codemode-bridge run
     ```
 3.  **Use in your client**: Point your MCP client (Claude Desktop, VS Code, etc.) to `npx @ruifung/codemode-bridge`.
 
+## Discovery Tools
+
+The bridge exposes three tools for discovering what's available before writing `eval` code:
+
+| Tool | Description |
+|------|-------------|
+| `get_tools` | List all available tools grouped by server. Accepts an optional `server` filter. |
+| `get_tool_schema` | Get the TypeScript type definition for a specific tool by name (e.g. `gitlab__list_projects`). |
+| `search_tools` | Keyword-search all tool names and descriptions. Returns matching tools with their schemas. |
+
+Use these before calling `eval` to find the correct tool name and parameter types.
+
+## Using the `eval` Tool
+
+The `eval` tool executes JavaScript in a sandboxed environment with access to all upstream tools via the `codemode` object. You can write either a function body or a complete async arrow function:
+
+```javascript
+// Function body (auto-wrapped):
+const result = await codemode.gitlab__list_projects({ owned: true });
+return result;
+
+// Or as a complete async arrow function:
+async () => {
+  const result = await codemode.gitlab__list_projects({ owned: true });
+  return result;
+}
+```
+
 ## Documentation Index
 
 - [**Architecture**](./docs/architecture.md): How the bridge works, project structure, and logical flow.
@@ -47,7 +76,3 @@ codemode-bridge run
 - [**Integration Guide**](./docs/integration.md): Setup instructions for Claude Desktop, VS Code, and more.
 - [**Development**](./docs/development.md): Build and test instructions for contributors.
 - [**Sandbox Hardening**](./docs/sandbox-hardening.md): Security details for the execution environments.
-
-## Acknowledgements
-
-Built on Cloudflare's [`@cloudflare/codemode`](https://www.npmjs.com/package/@cloudflare/codemode) SDK.

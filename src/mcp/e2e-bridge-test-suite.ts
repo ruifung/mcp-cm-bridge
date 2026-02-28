@@ -23,11 +23,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { createCodeTool } from '@cloudflare/codemode/ai';
 import { z } from 'zod';
-import type { Executor } from '@cloudflare/codemode';
-import { adaptAISDKToolToMCP } from './mcp-adapter.js';
-import { jsonSchemaToZod } from './server.js';
+import type { Executor } from '../executor/types.js';
+import { normalizeCode, sanitizeToolName } from './schema-utils.js';
 import { getRuntimeName } from '../utils/env.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -132,32 +130,55 @@ async function createMockUpstreamServer() {
 
 /**
  * Create the full codemode bridge pipeline with a given executor and return a
- * downstream MCP client that can call the codemode tool.
+ * downstream MCP client that can call the eval tool.
  */
 async function createBridgePipeline(upstreamClient: Client, serverName: string, executor: Executor) {
   // 1. List tools from upstream (native MCP format)
   const { tools: upstreamTools } = await upstreamClient.listTools();
 
-  // 2. Convert to ToolDescriptor format with execute functions
-  const toolDescriptors: Record<string, any> = {};
+  // 2. Convert to callable fns keyed by namespaced name
+  const fns: Record<string, (args: unknown) => Promise<unknown>> = {};
   for (const tool of upstreamTools) {
-    const namespacedName = `${serverName}__${tool.name}`;
-    toolDescriptors[namespacedName] = {
-      description: tool.description || '',
-      inputSchema: jsonSchemaToZod(tool.inputSchema),
-      execute: async (args: any) => {
-        const result = await upstreamClient.callTool({ name: tool.name, arguments: args });
-        return result;
-      },
+    const namespacedName = sanitizeToolName(`${serverName}__${tool.name}`);
+    fns[namespacedName] = async (args: any) => {
+      return upstreamClient.callTool({ name: tool.name, arguments: args });
     };
   }
 
-  // 3. Create the codemode tool via SDK
-  const codemodeTool = createCodeTool({ tools: toolDescriptors, executor });
+  // 3. Build a human-readable tool list for the eval tool description
+  const toolList = upstreamTools
+    .map((t) => `  - ${serverName}__${t.name}: ${t.description || ''}`)
+    .join('\n');
 
-  // 4. Create bridge MCP server and register codemode tool
+  const evalDescription = `Execute JavaScript/TypeScript code in a sandboxed environment.\n\n## Available tools\n${toolList}`;
+
+  // 4. Create bridge MCP server and register the eval tool directly
   const bridgeServer = new McpServer({ name: 'codemode-bridge-test', version: '1.0.0' });
-  await adaptAISDKToolToMCP(bridgeServer, codemodeTool);
+
+  bridgeServer.registerTool(
+    'eval',
+    {
+      description: evalDescription,
+      inputSchema: z.object({
+        code: z.string().describe('Code to execute'),
+      }).strict(),
+    },
+    async ({ code }) => {
+      const normalizedCode = normalizeCode(code);
+      const executeResult = await executor.execute(normalizedCode, fns);
+
+      if (executeResult.error) {
+        const logCtx = executeResult.logs?.length
+          ? `\n\nConsole output:\n${executeResult.logs.join('\n')}`
+          : '';
+        throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
+      }
+
+      const output: Record<string, unknown> = { code, result: executeResult.result };
+      if (executeResult.logs?.length) output.logs = executeResult.logs;
+      return { content: [{ type: 'text' as const, text: JSON.stringify(output) }] };
+    },
+  );
 
   // 5. Wire up downstream client via InMemoryTransport
   const [downstreamClientTransport, downstreamServerTransport] = InMemoryTransport.createLinkedPair();

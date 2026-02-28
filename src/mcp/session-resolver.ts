@@ -6,9 +6,8 @@
  * guard, and singleton management can be unit-tested independently.
  */
 
-import type { Executor } from '@cloudflare/codemode';
+import type { Executor } from '../executor/types.js';
 import type { ExecutorInfo } from './executor.js';
-import type { ExecutorResolver } from './mcp-adapter.js';
 
 // ── Public constants ───────────────────────────────────────────────────────
 
@@ -125,8 +124,6 @@ export class SessionResolver {
    * - sessionId is provided, session exists → resets idle timer, returns cached executor
    * - sessionId is provided, session missing → creates new executor (with race-condition guard)
    * - sessionId is provided, creation fails → falls back to singleton session
-   *
-   * Satisfies the `ExecutorResolver` type from mcp-adapter.ts.
    */
   async resolve(sessionId?: string): Promise<Executor> {
     // Falsy sessionId → singleton path (single unified code path)

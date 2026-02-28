@@ -5,7 +5,7 @@
  * container-socket) and are extracted here to avoid duplication.
  */
 
-import type { ExecuteResult } from '@cloudflare/codemode';
+import type { ExecuteResult } from './types.js';
 
 // ── Host → Runtime messages ─────────────────────────────────────────
 
