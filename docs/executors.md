@@ -1,15 +1,15 @@
 # Executors
 
-The Code Mode Bridge supports four executor backends. On startup, it automatically selects the best available one based on the current runtime and environment. You can force a specific executor via the `--executor` flag or `EXECUTOR_TYPE` environment variable.
+The Code Mode Bridge supports four executor backends. On startup, it automatically selects the best available one based on what's available in the environment. You can force a specific executor via the `--executor` flag or `EXECUTOR_TYPE` environment variable.
 
 ## Selection Order (auto-detect)
 
 | Priority | Executor | Selection Criteria |
-|----------|------------|---------------------------------------------|
-| 0 | `deno` | Running on Deno runtime |
-| 1 | `isolated-vm` | Node.js LTS (even-numbered) and `isolated-vm` package is installed |
-| 2 | `container` | Docker or Podman runtime is available (Socket or CLI) |
-| 3 | `vm2` | Node.js runtime (not Bun) |
+|----------|--------------|------------------------------------------------------|
+| 0 | `isolated-vm` | Node.js with V8 isolate support available |
+| 1 | `deno` | `deno` binary found in PATH |
+| 2 | `container` | Docker or Podman available (socket or CLI) |
+| 3 | `vm2` | Node.js (fallback; not available under Bun) |
 
 ## Environment Variables
 

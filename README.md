@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@ruifung/codemode-bridge)](https://www.npmjs.com/package/@ruifung/codemode-bridge)
 
-An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution. Supports Node.js, Bun, and Deno runtimes.
+An MCP (Model Context Protocol) server that connects to upstream MCP servers and exposes all their tools through a single `eval` tool for unified orchestration and execution. Runs on **Node.js** and **Deno**. Bun is not officially supported — if you need to use Bun, ensure a container runtime (Docker or Podman) or Deno is available in your PATH so the bridge can delegate code execution to a supported executor.
 
 ## Key Features
 

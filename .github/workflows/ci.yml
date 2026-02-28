@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [node, bun, deno]
+        runtime: [node, deno]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +25,6 @@ jobs:
           node-version: "24"
           cache: "npm"
 
-      - name: Setup Bun
-        if: matrix.runtime == 'bun'
-        uses: oven-sh/setup-bun@v2
-
       - name: Setup Deno
         if: matrix.runtime == 'deno'
         uses: denoland/setup-deno@v2
@@ -37,19 +33,13 @@ jobs:
         if: matrix.runtime == 'node'
         run: npm ci
 
-      - name: Install dependencies (Bun)
-        if: matrix.runtime == 'bun'
-        run: bun install
-
       - name: Install dependencies (Deno)
         if: matrix.runtime == 'deno'
         run: npm install # Need vitest locally for Deno tests
 
       - name: Pre-pull container images
         run: |
-          docker pull oven/bun:debian &
           docker pull denoland/deno:debian &
-          docker pull node:24-slim &
           wait
 
       - name: Run Tests
@@ -58,6 +48,4 @@ jobs:
             npm test run -- --reporter=verbose
           elif [ "${{ matrix.runtime }}" = "deno" ]; then
             deno run -A npm:vitest run --reporter=verbose
-          elif [ "${{ matrix.runtime }}" = "bun" ]; then
-            bun test --verbose
           fi
