@@ -157,7 +157,7 @@ _pendingResolvers, _toolResults, _toolErrors, protocol
 
 ### Cross-Call Isolation
 
-Each `codemode_eval` invocation runs in a **fresh isolate context**. The following mutations
+Each `codemode_sandbox_eval_js` invocation runs in a **fresh isolate context**. The following mutations
 were planted in one call and verified absent in the next:
 
 | Mutation                              | Persists? |

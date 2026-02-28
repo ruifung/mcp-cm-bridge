@@ -98,13 +98,34 @@ export interface ToolDescriptorForTypes {
 }
 
 /**
+ * Shared preamble emitted once at the top of the generated output.
+ * Represents the content block variants that MCP tools can return,
+ * and the required return type for sandbox_eval_js scripts.
+ */
+const CONTENT_BLOCK_PREAMBLE = `type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string /* base64-encoded */; mimeType: string }
+  | { type: "audio"; data: string /* base64-encoded */; mimeType: string }
+  | { type: "resource"; resource: { uri: string; text?: string; blob?: string } };
+
+type EvalReturn =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string /* base64-encoded */; mimeType: string }
+  | { type: "audio"; data: string /* base64-encoded */; mimeType: string }
+  | { type: "json"; value: unknown }
+  | EvalReturn[];`;
+
+/**
  * Generate TypeScript type definitions from tool descriptors.
  *
- * Output format is identical to @cloudflare/codemode's generateTypes() so
- * that the LLM-facing schema snippets are unchanged.  Reimplemented here to
- * avoid importing the main @cloudflare/codemode entry point, which contains a
- * top-level `import { RpcTarget } from "cloudflare:workers"` that fails in
- * Node.js.
+ * Output format reflects the actual MCP envelope shape that callers receive:
+ * - `content` — array of ContentBlock (text, image, audio, resource)
+ * - `structuredContent` — typed from outputSchema if present, otherwise `Record<string, unknown>`
+ * - `isError` — optional boolean
+ *
+ * Reimplemented here to avoid importing the main @cloudflare/codemode entry
+ * point, which contains a top-level `import { RpcTarget } from
+ * "cloudflare:workers"` that fails in Node.js.
  */
 export function generateTypes(tools: Record<string, ToolDescriptorForTypes>): string {
   let availableTools = "";
@@ -116,20 +137,35 @@ export function generateTypes(tools: Record<string, ToolDescriptorForTypes>): st
     const outputSchema = tool.outputSchema;
     const description = tool.description;
     const safeName = sanitizeToolName(toolName);
+    const typeName = toCamelCase(safeName);
+
     const inputType = printNode(
       createTypeAlias(
         zodToTs(inputSchema, { auxiliaryTypeStore }).node,
-        `${toCamelCase(safeName)}Input`
+        `${typeName}Input`
       )
     );
-    const outputType = outputSchema
-      ? printNode(
-          createTypeAlias(
-            zodToTs(outputSchema, { auxiliaryTypeStore }).node,
-            `${toCamelCase(safeName)}Output`
-          )
-        )
-      : `type ${toCamelCase(safeName)}Output = unknown`;
+
+    // Build the envelope output type.
+    // When outputSchema is present, derive structuredContent from it via zod-to-ts.
+    // When absent, structuredContent falls back to Record<string, unknown>.
+    let outputType: string;
+    if (outputSchema) {
+      const structuredContentType = printNode(
+        zodToTs(outputSchema, { auxiliaryTypeStore }).node
+      );
+      outputType = `type ${typeName}Output = {
+  content: ContentBlock[];
+  structuredContent?: ${structuredContentType};
+  isError?: boolean;
+}`;
+    } else {
+      outputType = `type ${typeName}Output = {
+  content: ContentBlock[];
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+}`;
+    }
 
     availableTypes += `\n${inputType.trim()}`;
     availableTypes += `\n${outputType.trim()}`;
@@ -139,15 +175,21 @@ export function generateTypes(tools: Record<string, ToolDescriptorForTypes>): st
     if (description?.trim()) jsdocLines.push(description.trim());
     else jsdocLines.push(toolName);
     for (const pd of paramDescs) jsdocLines.push(pd);
+    if (!outputSchema) {
+      jsdocLines.push(
+        "@returns MCP envelope. `structuredContent` shape is unknown — inspect at runtime. `content[0].text` may contain JSON."
+      );
+    }
     const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
 
     availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-    availableTools += `\n\t${safeName}: (input: ${toCamelCase(safeName)}Input) => Promise<${toCamelCase(safeName)}Output>;`;
+    availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
     availableTools += "\n";
   }
 
   availableTools = `\ndeclare const codemode: {${availableTools}}`;
   return `
+${CONTENT_BLOCK_PREAMBLE}
 ${availableTypes}
 ${availableTools}
   `.trim();

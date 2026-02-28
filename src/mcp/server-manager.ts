@@ -28,6 +28,7 @@ export interface ManagedServer {
 export interface ToolDescriptor {
   description: string;
   inputSchema: any; // Zod schema
+  outputSchema?: any; // Zod schema (optional)
   /** Original JSON Schema from the upstream MCP server, before Zod conversion. */
   rawSchema: any;
   execute: (args: any) => Promise<any>;
@@ -184,6 +185,7 @@ export class ServerManager {
     return {
       description: toolDef.description || "",
       inputSchema: jsonSchemaToZod(toolDef.inputSchema),
+      outputSchema: toolDef.outputSchema ? jsonSchemaToZod(toolDef.outputSchema) : undefined,
       rawSchema,
       execute: async (args: any) => {
         logDebug(`Calling tool: ${serverName}__${toolName}`, {

@@ -132,18 +132,108 @@ The code parameter accepts one of two formats. Do not mix them.
 Format A — Bare statements. Write one or more JavaScript statements. They will be wrapped in an async function automatically. You can use await freely. To produce output, either use an explicit return statement, or let the last expression be the value you want returned (it is returned automatically). If you do not return a value and there is no final expression, the result is null.
 
   const result = await codemode.server_name__function_name({ param: "value" });
-  return result;
+  return { type: "json", value: result };
 
 Format B — A complete async arrow function expression. The entire input must be the function; do not include any other top-level statements. You must use an explicit return statement.
 
   async () => {
     const result = await codemode.server_name__function_name({ param: "value" });
-    return result;
+    return { type: "json", value: result };
   }
 
 The sandbox provides only the codemode object. No other APIs are available: no filesystem functions, no network functions, no require() or import statements. The only callable functions are properties on the codemode object.
 
-The return value must be JSON-serializable: strings, numbers, booleans, arrays, plain objects, or null. Functions and class instances cannot be returned. Returning undefined is not supported. Thrown exceptions fail the call.`;
+REQUIRED RETURN TYPE — scripts MUST return an EvalReturn value. Plain values are not accepted.
+
+  type EvalReturn =
+    | { type: "text"; text: string }                    // plain text output
+    | { type: "image"; data: string; mimeType: string } // base64-encoded image
+    | { type: "audio"; data: string; mimeType: string } // base64-encoded audio
+    | { type: "json"; value: unknown }                  // any JSON-serializable value
+    | EvalReturn[];                                     // multiple content blocks
+
+Examples of valid return values:
+  return { type: "json", value: result };
+  return { type: "text", text: "done" };
+  return { type: "image", data: base64String, mimeType: "image/png" };
+  return [{ type: "text", text: "summary" }, { type: "json", value: details }];
+
+Returning a plain value (e.g. \`return result\`) will cause a validation error.`;
+
+
+// ── EvalReturn validation and mapping ────────────────────────────────────────
+
+/**
+ * The required return type for sandbox_eval_js scripts.
+ * Plain values are not accepted — all returns must conform to this shape.
+ */
+export type EvalReturn =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string }
+  | { type: "json"; value: unknown }
+  | EvalReturn[];
+
+/**
+ * Validate that a value conforms to EvalReturn.
+ * Returns true if valid, false otherwise.
+ */
+export function isValidEvalReturn(value: unknown): value is EvalReturn {
+  if (Array.isArray(value)) {
+    return value.every(isValidEvalReturn);
+  }
+  if (value === null || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  switch (obj["type"]) {
+    case "text":
+      return typeof obj["text"] === "string";
+    case "image":
+    case "audio":
+      return typeof obj["data"] === "string" && typeof obj["mimeType"] === "string";
+    case "json":
+      return "value" in obj;
+    default:
+      return false;
+  }
+}
+
+type McpContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string };
+
+/**
+ * Map a validated EvalReturn value to an array of MCP content blocks.
+ * JSON variants are serialised to text content blocks.
+ */
+export function mapEvalReturnToContent(
+  evalReturn: EvalReturn
+): { content: McpContentBlock[] } {
+  const items: Exclude<EvalReturn, EvalReturn[]>[] = Array.isArray(evalReturn)
+    ? evalReturn as Exclude<EvalReturn, EvalReturn[]>[]
+    : [evalReturn as Exclude<EvalReturn, EvalReturn[]>];
+
+  const content: McpContentBlock[] = [];
+
+  for (const item of items) {
+    switch (item.type) {
+      case "text":
+        content.push({ type: "text", text: item.text });
+        break;
+      case "image":
+        content.push({ type: "image", data: item.data, mimeType: item.mimeType });
+        break;
+      case "audio":
+        content.push({ type: "audio", data: item.data, mimeType: item.mimeType });
+        break;
+      case "json":
+        content.push({ type: "text", text: JSON.stringify(item.value, null, 2) });
+        break;
+    }
+  }
+
+  return { content };
+}
 
 // ── Shared status tool registration ───────────────────────────────────────
 
@@ -157,6 +247,12 @@ function registerStatusTool(
     {
       description: "Return the current status of the codemode bridge, including connected server names and the number of functions each server provides. Use this to see which servers are available before calling sandbox_get_functions.",
       inputSchema: z.object({}).strict(),
+      outputSchema: z.object({
+        servers: z.array(z.object({
+          name: z.string(),
+          toolCount: z.number(),
+        })),
+      }),
     },
     async () => {
       const serverInfo = serverManager.getServerToolInfo();
@@ -172,8 +268,11 @@ function registerStatusTool(
         totalTools,
       };
 
+      const servers = serverInfo.map(({ name, toolCount }) => ({ name, toolCount }));
+
       return {
         content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+        structuredContent: { servers },
       } as any;
     }
   );
@@ -209,6 +308,15 @@ function registerDiscoveryTools(
         cursor: z.string().optional().describe("Pagination cursor returned in the nextCursor field of a previous response. Omit this parameter for the first page. The cursor is opaque. Do not parse or construct it yourself."),
         pageSize: z.number().int().min(1).max(200).default(50).optional().describe("Number of functions to return per page. Must be between 1 and 200. Defaults to 50 if omitted."),
       }).strict(),
+      outputSchema: z.object({
+        tools: z.array(z.object({
+          server: z.string(),
+          name: z.string(),
+          description: z.string(),
+          schema: z.string().optional(),
+        })),
+        nextCursor: z.string().optional(),
+      }),
     },
     async (args) => {
       const flat = serverManager.getToolList(args.server);
@@ -217,8 +325,21 @@ function registerDiscoveryTools(
       if ('error' in result) {
         return { content: [{ type: 'text' as const, text: result.error }], isError: true } as any;
       }
+      // Decode cursor offset to find which slice was returned
+      let offset = 0;
+      if (args.cursor !== undefined) {
+        try {
+          offset = (JSON.parse(Buffer.from(args.cursor, 'base64url').toString('utf8')) as { o: number }).o;
+        } catch { /* use 0 */ }
+      }
+      const pageTools = flat.slice(offset, offset + pageSize);
+      const structuredContent: { tools: Array<{ server: string; name: string; description: string; schema?: string }>; nextCursor?: string } = {
+        tools: pageTools.map((t) => ({ server: t.server, name: t.name, description: t.description })),
+      };
+      if (result.nextCursor !== undefined) structuredContent.nextCursor = result.nextCursor;
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        structuredContent,
       } as any;
     }
   );
@@ -231,12 +352,16 @@ function registerDiscoveryTools(
       inputSchema: z.object({
         tool_name: z.string().describe("The function name to look up, exactly as returned by sandbox_get_functions or sandbox_search_functions. Example: server_name__function_name."),
       }).strict(),
+      outputSchema: z.object({
+        typeScript: z.string(),
+      }),
     },
     async (args) => {
       const cached = schemaCache.get(args.tool_name);
       if (cached !== undefined) {
         return {
           content: [{ type: "text" as const, text: cached }],
+          structuredContent: { typeScript: cached },
         } as any;
       }
 
@@ -255,6 +380,7 @@ function registerDiscoveryTools(
 
       return {
         content: [{ type: "text" as const, text: snippet }],
+        structuredContent: { typeScript: snippet },
       } as any;
     }
   );
@@ -268,11 +394,19 @@ function registerDiscoveryTools(
         query: z.string().describe("One or more keywords to search for. Matched against function names and descriptions. Example: list projects."),
         limit: z.number().int().min(1).max(20).optional().describe("Maximum number of results to return. Must be between 1 and 20. Defaults to 5 if omitted."),
       }).strict(),
+      outputSchema: z.object({
+        tools: z.array(z.object({
+          name: z.string(),
+          description: z.string(),
+          schema: z.string().optional(),
+        })),
+      }),
     },
     async (args) => {
       const results = searchProvider.search(args.query, args.limit ?? 5);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+        structuredContent: { tools: results },
       } as any;
     }
   );
@@ -400,9 +534,48 @@ export async function startCodeModeBridgeServer(
         throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
       }
 
-      const output: Record<string, unknown> = { code: args.code, result: executeResult.result };
-      if (executeResult.logs?.length) output.logs = executeResult.logs;
-      return { content: [{ type: "text" as const, text: JSON.stringify(output) }] };
+      const raw = executeResult.result;
+
+      // Validate the return value against EvalReturn
+      if (!isValidEvalReturn(raw)) {
+        const received = raw === null ? "null"
+          : Array.isArray(raw) ? `array(${(raw as unknown[]).length})`
+          : typeof raw === "object" ? `object with keys: ${Object.keys(raw as object).join(", ") || "(none)"}`
+          : typeof raw;
+        const errorText =
+          `sandbox_eval_js: script returned an invalid value.\n\n` +
+          `Received: ${received}\n\n` +
+          `Scripts MUST return an EvalReturn value. Wrap your result like this:\n\n` +
+          `  return { type: "json", value: result };\n\n` +
+          `The full EvalReturn type is:\n` +
+          `  type EvalReturn =\n` +
+          `    | { type: "text"; text: string }\n` +
+          `    | { type: "image"; data: string; mimeType: string }\n` +
+          `    | { type: "audio"; data: string; mimeType: string }\n` +
+          `    | { type: "json"; value: unknown }\n` +
+          `    | EvalReturn[];`;
+        const logCtx = executeResult.logs?.length
+          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
+          : "";
+        return {
+          content: [{ type: "text" as const, text: errorText + logCtx }],
+          isError: true,
+        };
+      }
+
+      const mapped = mapEvalReturnToContent(raw);
+
+      if (executeResult.logs?.length) {
+        mapped.content.push({
+          type: "text",
+          text: `\n\nConsole output:\n${executeResult.logs.join("\n")}`,
+        });
+      }
+
+      return {
+        content: mapped.content,
+        isError: false,
+      } as any;
     };
   }
 

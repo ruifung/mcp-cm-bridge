@@ -68,18 +68,25 @@ let sharedTransport: StreamableHTTPClientTransport;
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Call the eval tool and parse the JSON result.
+ * Call the eval tool and return the result extracted from content[0].text.
+ *
+ * The bridge maps `{ type: "json", value }` returns to a text content block
+ * containing JSON.stringify(value). We parse that text to recover the value.
  */
 async function callEval(
   client: Client,
   code: string,
-): Promise<{ code: string; result: any; logs?: string[] }> {
+): Promise<{ result: any; logs?: string[] }> {
   const response = await client.callTool({ name: 'sandbox_eval_js', arguments: { code } });
   const content = (response as any).content;
   if (!content || !Array.isArray(content) || content.length === 0) {
     throw new Error(`Unexpected response shape: ${JSON.stringify(response)}`);
   }
-  return JSON.parse(content[0].text);
+  try {
+    return { result: JSON.parse(content[0].text) };
+  } catch {
+    throw new Error(`Could not extract result from response: ${JSON.stringify(response)}`);
+  }
 }
 
 /**
@@ -162,7 +169,7 @@ describe('HTTP Serve Mode E2E', () => {
   // ── 3. Single client: basic eval ─────────────────────────────────────────
 
   it('should execute a simple arithmetic expression via eval', async () => {
-    const output = await callEval(sharedClient, 'async () => 6 * 7');
+    const output = await callEval(sharedClient, 'async () => { return { type: "json", value: 6 * 7 }; }');
     expect(output.result).toBe(42);
   });
 
@@ -187,10 +194,10 @@ describe('HTTP Serve Mode E2E', () => {
 
   it('should isolate globalThis state between successive eval calls (vm2 fresh-sandbox semantics)', async () => {
     // First call: set a global variable
-    await callEval(sharedClient, 'async () => { globalThis.isolationProbe = "set-by-call-1"; }');
+    await callEval(sharedClient, 'async () => { globalThis.isolationProbe = "set-by-call-1"; return { type: "json", value: null }; }');
 
     // Second call: the variable must NOT be visible — fresh sandbox
-    const output = await callEval(sharedClient, 'async () => typeof globalThis.isolationProbe');
+    const output = await callEval(sharedClient, 'async () => { return { type: "json", value: typeof globalThis.isolationProbe }; }');
     expect(output.result).toBe('undefined');
   });
 
@@ -257,8 +264,8 @@ describe('HTTP Serve Mode E2E', () => {
       // vm2 creates a fresh sandbox per call, so no state leaks between calls
       // regardless of session. We verify sessions are truly isolated by checking
       // that both clients function independently with their own eval context.
-      const resultA = await callEval(sharedClient, 'async () => 100 + 1');
-      const resultB = await callEval(clientB, 'async () => 200 + 2');
+      const resultA = await callEval(sharedClient, 'async () => { return { type: "json", value: 100 + 1 }; }');
+      const resultB = await callEval(clientB, 'async () => { return { type: "json", value: 200 + 2 }; }');
 
       expect(resultA.result).toBe(101);
       expect(resultB.result).toBe(202);
@@ -288,8 +295,8 @@ describe('HTTP Serve Mode E2E', () => {
     try {
       // Fire both eval calls concurrently
       const [resultA, resultC] = await Promise.all([
-        callEval(sharedClient, 'async () => { return "from-A"; }'),
-        callEval(clientC,      'async () => { return "from-C"; }'),
+        callEval(sharedClient, 'async () => { return { type: "json", value: "from-A" }; }'),
+        callEval(clientC,      'async () => { return { type: "json", value: "from-C" }; }'),
       ]);
 
       expect(resultA.result).toBe('from-A');
