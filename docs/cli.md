@@ -121,20 +121,34 @@ Servers are stored in `~/.config/codemode-bridge/mcp.json` (on Windows, typicall
 
 ## MCP Tools Reference
 
-The bridge exposes two primary tools to the client:
+The bridge exposes the following tools to the client:
 
-### `eval`
+> **Recommended workflow:** Before calling `sandbox_eval_js`, use the discovery tools to find the right function name and confirm its parameters: first call `sandbox_search_functions` or `sandbox_get_functions`, then `sandbox_get_function_schema`, then write your `sandbox_eval_js` code.
 
-Executes agent-generated JavaScript/TypeScript code with access to all upstream tools via the `codemode` namespace.
+### `sandbox_get_functions`
+
+Lists available functions grouped by server. Each result includes the function name (use it as `codemode.<name>(...)` in `sandbox_eval_js`) and its description. Supports an optional `server` filter and pagination via `cursor`.
+
+### `sandbox_get_function_schema`
+
+Returns the TypeScript type signature for a specific function, including parameter names, types, and JSDoc. Use this before writing `sandbox_eval_js` code to confirm parameter names and required fields. Pass the exact function name from `sandbox_get_functions` or `sandbox_search_functions`.
+
+### `sandbox_search_functions`
+
+Keyword search across function names and descriptions. Use this when you know what you want but not the exact name. Returns function names, descriptions, and may include type signatures.
+
+### `sandbox_eval_js`
+
+Executes agent-generated JavaScript/TypeScript code with access to all upstream functions via the `codemode` namespace.
 
 ```typescript
 // Example: cross-server orchestration
-const time = await codemode.time__get_current_time({ timezone: "America/New_York" });
-const pods = await codemode.kubernetes__pods_list_in_namespace({ namespace: "default" });
-return { time, podCount: pods.length };
+const result_a = await codemode.server_a__function_name({ param: "value" });
+const result_b = await codemode.server_b__function_name({ param: "value" });
+return { result_a, result_b };
 ```
 
-### `status`
+### `sandbox_status`
 
 Returns metadata about the running bridge:
 - Current executor type and selection reason

@@ -43,10 +43,10 @@ Example illustrating independent state:
 
 ```typescript
 // Client A: sets a variable
-await clientA.callTool({ name: 'eval', arguments: { code: 'async () => { globalThis.x = 42; }' } });
+await clientA.callTool({ name: 'sandbox_eval_js', arguments: { code: 'async () => { globalThis.x = 42; }' } });
 
 // Client B: cannot see Client A's variable
-await clientB.callTool({ name: 'eval', arguments: { code: 'async () => { return globalThis.x; }' } });
+await clientB.callTool({ name: 'sandbox_eval_js', arguments: { code: 'async () => { return globalThis.x; }' } });
 // → undefined
 ```
 
@@ -110,7 +110,7 @@ const { tools } = await client.listTools();
 
 // Call a tool
 const result = await client.callTool({
-  name: 'eval',
+  name: 'sandbox_eval_js',
   arguments: { code: 'async () => { return 1 + 1; }' }
 });
 ```

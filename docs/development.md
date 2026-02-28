@@ -50,4 +50,4 @@ This project is largely AI-generated. It serves as an experiment to get Cloudfla
 
 ## Acknowledgements
 
-This project is built on [`@cloudflare/codemode`](https://www.npmjs.com/package/@cloudflare/codemode), Cloudflare's Code Mode SDK. The SDK provides the core tool-wrapping and type-generation engine that enables agents to call multiple MCP tools through a single `eval` interface. This project adapts that capability to run locally using sandboxed executors.
+This project is built on [`@cloudflare/codemode`](https://www.npmjs.com/package/@cloudflare/codemode), Cloudflare's Code Mode SDK. The SDK provides the core tool-wrapping and type-generation engine that enables agents to call multiple MCP tools through a single `sandbox_eval_js` interface. This project adapts that capability to run locally using sandboxed executors.

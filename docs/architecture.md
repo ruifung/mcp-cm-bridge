@@ -7,8 +7,8 @@ Code Mode Bridge acts as a protocol multiplexer and execution sandbox. It bridge
 1.  **Connection**: The bridge connects to all configured upstream MCP servers (via stdio or HTTP).
 2.  **Tool Collection**: It gathers tool definitions from all servers via the MCP protocol.
 3.  **Tool Wrapping**: It uses the Code Mode SDK to wrap these tools with auto-generated TypeScript definitions.
-4.  **Exposure**: It exposes two MCP tools to the client: `eval` (for code execution) and `status` (for introspection).
-5.  **Execution**: When `eval` is called, the bridge runs the provided code in a selected [executor](./executors.md) sandbox, providing access to upstream tools via the `codemode.*` namespace.
+4.  **Exposure**: It exposes two MCP tools to the client: `sandbox_eval_js` (for code execution) and `sandbox_status` (for introspection).
+5.  **Execution**: When `sandbox_eval_js` is called, the bridge runs the provided code in a selected [executor](./executors.md) sandbox, providing access to upstream tools via the `codemode.*` namespace.
 
 ## Logical Flow
 
@@ -21,7 +21,7 @@ Code Mode Bridge acts as a protocol multiplexer and execution sandbox. It bridge
 +------------------------v--------------------------------+
 |         Code Mode Bridge (MCP Server)                   |
 |  +--------------------------------------------------+   |
-|  |  "eval" Tool            "status" Tool             |   |
+|  |  "sandbox_eval_js" Tool  "sandbox_status" Tool    |   |
 |  |  - Auto-generated type definitions                |   |
 |  |  - Sandbox code execution                         |   |
 |  |  - Tool orchestration                             |   |
