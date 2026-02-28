@@ -40,6 +40,81 @@ export type { MCPServerConfig, ExecutorType }
 // Re-export jsonSchemaToZod for backwards compatibility (moved to schema-utils.ts)
 export { jsonSchemaToZod } from "./schema-utils.js";
 
+// ── Cursor-based pagination for get_tools ─────────────────────────────────────
+
+export interface PaginateInput {
+  tools: Array<{ server: string; name: string; description: string }>;
+  cursor?: string;   // base64url-encoded JSON { o: number }
+  pageSize: number;  // already validated: 1–200
+}
+
+export interface PaginateOutput {
+  data: Array<{ server: string; tools: Array<{ name: string; description: string }> }>;
+  nextCursor?: string;
+  totalTools: number;
+}
+
+/**
+ * Slice a flat tool list into a cursor-paginated page and group by server.
+ *
+ * Returns `{ error: string }` when the cursor is syntactically invalid so the
+ * caller can surface a meaningful error without throwing.
+ */
+export function paginateToolList(input: PaginateInput): PaginateOutput | { error: string } {
+  const { tools, cursor, pageSize } = input;
+
+  // Decode cursor → offset
+  let offset = 0;
+  if (cursor !== undefined) {
+    try {
+      const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
+      if (
+        typeof decoded !== 'object' ||
+        decoded === null ||
+        !('o' in decoded) ||
+        typeof (decoded as any).o !== 'number' ||
+        !Number.isInteger((decoded as any).o) ||
+        (decoded as any).o < 0
+      ) {
+        return { error: 'Invalid cursor' };
+      }
+      offset = (decoded as { o: number }).o;
+    } catch {
+      return { error: 'Invalid cursor' };
+    }
+  }
+
+  // Slice the flat list
+  const page = tools.slice(offset, offset + pageSize);
+
+  // Group by server
+  const grouped = new Map<string, Array<{ name: string; description: string }>>();
+  for (const entry of page) {
+    if (!grouped.has(entry.server)) {
+      grouped.set(entry.server, []);
+    }
+    grouped.get(entry.server)!.push({ name: entry.name, description: entry.description });
+  }
+
+  const data = Array.from(grouped.entries()).map(([serverName, serverTools]) => ({
+    server: serverName,
+    tools: serverTools,
+  }));
+
+  // Compute nextCursor
+  const nextOffset = offset + pageSize;
+  const nextCursor =
+    nextOffset < tools.length
+      ? Buffer.from(JSON.stringify({ o: nextOffset })).toString('base64url')
+      : undefined;
+
+  return {
+    data,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+    totalTools: tools.length,
+  };
+}
+
 /**
  * Short, static description for the eval tool.
  * Discovery tools (get_tools, search_tools, get_tool_schema) let the LLM
@@ -70,7 +145,7 @@ function registerStatusTool(
   target.registerTool(
     "status",
     {
-      description: "Get the current status of the codemode bridge: executor mode, upstream server connections, and available tools.",
+      description: "Get the current status of the codemode bridge: executor mode, available tool servers. Use this to obtain a list of tool servers.",
       inputSchema: z.object({}).strict(),
     },
     async () => {
@@ -121,28 +196,17 @@ function registerDiscoveryTools(
       description: "List all available tools grouped by server. Use this to discover what servers and tools are connected to the bridge.",
       inputSchema: z.object({
         server: z.string().optional().describe("Server name to filter by. Omit to list all servers."),
+        cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit for the first page."),
+        pageSize: z.number().int().min(1).max(200).default(50).optional().describe("Number of tools per page (1–200, default 50)."),
       }).strict(),
     },
     async (args) => {
       const flat = serverManager.getToolList(args.server);
-
-      // Group by server
-      const grouped = new Map<string, Array<{ name: string; description: string }>>();
-      for (const entry of flat) {
-        if (!grouped.has(entry.server)) {
-          grouped.set(entry.server, []);
-        }
-        grouped.get(entry.server)!.push({
-          name: entry.name,
-          description: entry.description,
-        });
+      const pageSize = args.pageSize ?? 50;
+      const result = paginateToolList({ tools: flat, cursor: args.cursor, pageSize });
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: result.error }], isError: true } as any;
       }
-
-      const result = Array.from(grouped.entries()).map(([serverName, tools]) => ({
-        server: serverName,
-        tools,
-      }));
-
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       } as any;
