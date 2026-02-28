@@ -18,6 +18,14 @@
  *   codemode-bridge auth logout <name>       - Logout from an OAuth server
  */
 
+// Bun is not supported — exit early with a helpful message
+if (typeof (globalThis as Record<string, unknown>)['Bun'] !== 'undefined') {
+  console.error(
+    'Error: codemode-bridge does not support Bun. Please use Node.js or Deno.',
+  );
+  process.exit(1);
+}
+
 import { Command } from "commander";
 import {
   runServer,

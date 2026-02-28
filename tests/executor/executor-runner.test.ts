@@ -1,11 +1,11 @@
-import { createExecutorTestSuite } from './executor-test-suite.js';
-import { createVM2Executor } from './vm2-executor.js';
-import { createIsolatedVmExecutor } from './isolated-vm-executor.js';
-import { createContainerExecutor } from './container-executor.js';
-import { createDenoExecutor } from './deno-executor.js';
+import { createExecutorTestSuite } from '../../src/executor/executor-test-suite.js';
+import { createVM2Executor } from '../../src/executor/vm2-executor.js';
+import { createIsolatedVmExecutor } from '../../src/executor/isolated-vm-executor.js';
+import { createContainerExecutor } from '../../src/executor/container-executor.js';
+import { createDenoExecutor } from '../../src/executor/deno-executor.js';
 import { execSync } from 'node:child_process';
-import { isNode, isBun, getNodeMajorVersion } from '../utils/env.js';
-import { initializeLogger } from '../utils/logger.js';
+import { isNode, isBun, getNodeMajorVersion } from '../../src/utils/env.js';
+import { initializeLogger } from '../../src/utils/logger.js';
 
 initializeLogger(true);
 
@@ -30,7 +30,7 @@ const isEvenNodeVersion = nodeMajorVersion > 0 && nodeMajorVersion % 2 === 0;
 
 if (isNode() && isEvenNodeVersion) {
   try {
-    const { createIsolatedVmExecutor } = await import('./isolated-vm-executor.js');
+    const { createIsolatedVmExecutor } = await import('../../src/executor/isolated-vm-executor.js');
     createExecutorTestSuite('isolated-vm', () =>
       createIsolatedVmExecutor({ memoryLimit: 256 }),
       {

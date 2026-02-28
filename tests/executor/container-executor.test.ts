@@ -9,21 +9,21 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // ── Module-level mocks (hoisted before imports) ─────────────────────
-vi.mock('./container-socket-executor.js', () => ({
+vi.mock('../../src/executor/container-socket-executor.js', () => ({
   ContainerSocketExecutor: vi.fn(),
 }));
-vi.mock('./container-cli-executor.js', () => ({
+vi.mock('../../src/executor/container-cli-executor.js', () => ({
   ContainerCliExecutor: vi.fn(),
 }));
-vi.mock('../utils/logger.js', () => ({
+vi.mock('../../src/utils/logger.js', () => ({
   logDebug: vi.fn(),
   logInfo: vi.fn(),
   logError: vi.fn(),
 }));
 
-import { ContainerExecutor } from './container-executor.js';
-import { ContainerSocketExecutor } from './container-socket-executor.js';
-import { ContainerCliExecutor } from './container-cli-executor.js';
+import { ContainerExecutor } from '../../src/executor/container-executor.js';
+import { ContainerSocketExecutor } from '../../src/executor/container-socket-executor.js';
+import { ContainerCliExecutor } from '../../src/executor/container-cli-executor.js';
 
 // ── Mock factory ────────────────────────────────────────────────────
 

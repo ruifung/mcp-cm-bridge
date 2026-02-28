@@ -11,13 +11,11 @@
     "config"
   ],
   "scripts": {
-    "build": "tsc && shx cp src/executor/*.mjs dist/executor/",
+    "build": "tsc",
     "prepare": "npm run build",
     "dev": "tsx src/cli/index.ts",
-    "dev:bun": "bun run src/cli/index.ts",
     "dev:deno": "deno run --allow-net --allow-read src/cli/index.ts",
     "test": "vitest",
-    "test:bun": "bun test",
     "test:deno": "deno run -A npm:vitest"
   },
   "keywords": [

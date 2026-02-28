@@ -7,15 +7,13 @@
 
 import Docker from 'dockerode';
 import { randomBytes } from 'node:crypto';
-import { createInterface, type Interface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
-import type { Executor, ExecuteResult } from '@cloudflare/codemode';
+import { RemoteExecutorBase } from './remote-executor-base.js';
+import type { HostMessage } from './remote-executor-types.js';
 import { resolveDockerSocketPath } from '../utils/docker.js';
-import { wrapCode } from './wrap-code.js';
-import { isBun, isDeno } from '../utils/env.js';
 import { logDebug, logInfo, logError } from '../utils/logger.js';
+import { getScriptPaths } from './script-paths.js';
 
 const MAX_STDERR_LINES = 100;
 const HEARTBEAT_INTERVAL_MS = 5_000; // 5 seconds
@@ -39,72 +37,24 @@ export interface ContainerSocketExecutorOptions {
   cpuLimit?: number;
 }
 
-/** Messages sent from host → container */
-type HostMessage =
-  | { type: 'execute'; id: string; code: string }
-  | { type: 'tool-result'; id: string; result: unknown }
-  | { type: 'tool-error'; id: string; error: string }
-  | { type: 'heartbeat' }
-  | { type: 'shutdown' };
-
-/** Messages sent from container → host */
-type ContainerMessage =
-  | { type: 'tool-call'; id: string; name: string; args: unknown }
-  | { type: 'result'; id: string; result: unknown; logs?: string[] }
-  | { type: 'error'; id: string; error: string; logs?: string[] }
-  | { type: 'error'; error: { message: string; stack?: string; name?: string } }
-  | { type: 'ready' };
-
-// ── Resolve runner script path ──────────────────────────────────────
-
-function getScriptPaths(): { runner: string; worker: string } {
-  let dir: string;
-  try {
-    dir = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    // @ts-ignore
-    dir = __dirname;
-  }
-  return {
-    runner: join(dir, 'container-runner.mjs'),
-    worker: join(dir, 'container-worker.mjs'),
-  };
-}
-
 // ── ContainerSocketExecutor ─────────────────────────────────────────
  
-export class ContainerSocketExecutor implements Executor {
+export class ContainerSocketExecutor extends RemoteExecutorBase {
 
   private docker: Docker;
   private image: string;
   private containerUser: string;
   private containerCommand: string[];
-  private timeout: number;
   private memoryLimit: number;
   private cpuLimit: number;
 
   private container: Docker.Container | null = null;
   private execStream: any = null;
-  private readline: Interface | null = null;
-  private ready = false;
   private stderrLines: string[] = [];
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
-  private readyResolve: (() => void) | null = null;
-  private readyReject: ((err: Error) => void) | null = null;
-
-  private pendingExecution: {
-    id: string;
-    resolve: (result: ExecuteResult) => void;
-    reject: (error: Error) => void;
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-    timeoutHandle: NodeJS.Timeout;
-  } | null = null;
-
-  private initPromise: Promise<void> | null = null;
-
   constructor(options: ContainerSocketExecutorOptions = {}) {
-    this.timeout = options.timeout ?? 30000;
+    super(options.timeout ?? 30000);
     
     // Parse memory limit
     if (typeof options.memoryLimit === 'string') {
@@ -128,23 +78,10 @@ export class ContainerSocketExecutor implements Executor {
     const socketPath = options.socketPath ?? resolveDockerSocketPath();
     this.docker = new Docker(socketPath ? { socketPath } : {});
 
-    if (options.image) {
-      this.image = options.image;
-      this.containerUser = options.user ?? '1000';
-      this.containerCommand = options.command ?? ['node'];
-    } else if (isBun()) {
-      this.image = 'oven/bun:debian';
-      this.containerUser = options.user ?? '1000';
-      this.containerCommand = ['bun', 'run'];
-    } else if (isDeno()) {
-      this.image = 'denoland/deno:debian';
-      this.containerUser = options.user ?? '1000';
-      this.containerCommand = ['deno', 'run', '-A'];
-    } else {
-      this.image = 'node:24-slim';
-      this.containerUser = options.user ?? '1000';
-      this.containerCommand = ['node'];
-    }
+    // Fixed Deno defaults — container always runs Deno
+    this.image = options.image ?? 'denoland/deno:debian';
+    this.containerUser = options.user ?? '1000';
+    this.containerCommand = options.command ?? ['deno', 'run', '--allow-read', '--allow-env=CODEMODE_WORKER_PATH', '--allow-net=none'];
 
     logDebug(`[ContainerExecutor] Initialized with image: ${this.image}`, { component: 'Executor' });
   }
@@ -163,14 +100,6 @@ export class ContainerSocketExecutor implements Executor {
       this.docker.modem.followProgress(stream, (err, res) => err ? reject(err) : resolve(res));
     });
     logDebug(`Pull complete for ${this.image}`, { component: 'Executor' });
-  }
-
-  private async init(): Promise<void> {
-    if (this.ready) return;
-    if (this.initPromise) return this.initPromise;
-
-    this.initPromise = this._init();
-    return this.initPromise;
   }
 
   /**
@@ -197,7 +126,7 @@ export class ContainerSocketExecutor implements Executor {
     });
   }
 
-  private async _init(): Promise<void> {
+  protected async _init(): Promise<void> {
     const scripts = getScriptPaths();
     logDebug('[Executor:Socket] Checking image...', { component: 'Executor' });
     await this.pullImage();
@@ -215,7 +144,8 @@ export class ContainerSocketExecutor implements Executor {
       this.container = await this.docker.createContainer({
         name: containerName,
         Image: this.image,
-        Cmd: [...this.containerCommand, '/app/container-runner.mjs'],
+        Cmd: [...this.containerCommand, '/app/container-runner.ts'],
+        Env: ['CODEMODE_WORKER_PATH=/app/container-worker.ts'],
         User: this.containerUser,
         OpenStdin: true,
         Labels: {
@@ -231,8 +161,8 @@ export class ContainerSocketExecutor implements Executor {
           Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=64m' },
           CapDrop: ['ALL'],
           Binds: [
-            `${scripts.runner}:/app/container-runner.mjs:ro`,
-            `${scripts.worker}:/app/container-worker.mjs:ro`
+            `${scripts.runner}:/app/container-runner.ts:ro`,
+            `${scripts.worker}:/app/container-worker.ts:ro`
           ],
           PidsLimit: 128
         },
@@ -289,7 +219,10 @@ export class ContainerSocketExecutor implements Executor {
       terminal: false
     });
 
-    this.readline.on('line', (line) => this.handleMessage(line));
+    this.readline.on('line', (line) => {
+      logDebug(`[Executor:Socket] Container stdout: ${line.substring(0, 200)}`, { component: 'Executor' });
+      this.handleMessage(line);
+    });
 
     logDebug('[Executor:Socket] Waiting for ready signal...', { component: 'Executor' });
     const readyPromise = new Promise<void>((resolve, reject) => {
@@ -352,179 +285,50 @@ export class ContainerSocketExecutor implements Executor {
     }, HEARTBEAT_INTERVAL_MS);
   }
 
-  private handleMessage(line: string): void {
-    if (!line.trim()) return;
-
-    logDebug(`[Executor:Socket] Container stdout: ${line.substring(0, 200)}`, { component: 'Executor' });
-
-    let msg: ContainerMessage;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      logError('Container sent non-JSON output (likely crashed)', { output: line });
-      if (this.readyReject) {
-        this.readyReject(new Error('Container sent non-JSON output: ' + line));
-      } else if (this.pendingExecution) {
-        clearTimeout(this.pendingExecution.timeoutHandle);
-        this.pendingExecution.reject(new Error('Container sent non-JSON output: ' + line));
-        this.pendingExecution = null;
-      }
-      return;
-    }
-
-    switch (msg.type) {
-      case 'tool-call':
-        this.handleToolCall(msg);
-        break;
-
-      case 'result':
-        if (this.pendingExecution && this.pendingExecution.id === msg.id) {
-          clearTimeout(this.pendingExecution.timeoutHandle);
-          this.pendingExecution.resolve({
-            result: msg.result,
-            logs: msg.logs,
-          });
-          this.pendingExecution = null;
-        }
-        break;
-
-      case 'error':
-        if (typeof (msg as any).id === 'string') {
-          // Execution-scoped error: { type, id, error, logs }
-          const execErr = msg as { type: 'error'; id: string; error: string; logs?: string[] };
-          if (this.pendingExecution && this.pendingExecution.id === execErr.id) {
-            clearTimeout(this.pendingExecution.timeoutHandle);
-            this.pendingExecution.resolve({
-              result: undefined,
-              error: execErr.error,
-              logs: execErr.logs,
-            });
-            this.pendingExecution = null;
-          }
-        } else {
-          // Top-level fatal error from the runner: { type, error: { message, stack, name } }
-          const fatalErr = msg as { type: 'error'; error: { message: string; stack?: string; name?: string } };
-          logError(
-            `[Executor:Socket] Container runner fatal error: ${fatalErr.error.message}\n${fatalErr.error.stack ?? ''}`,
-            { component: 'Executor' }
-          );
-          if (this.readyReject) {
-            this.readyReject(new Error(`Container runner fatal error: ${fatalErr.error.message}`));
-            this.readyResolve = null;
-            this.readyReject = null;
-          }
-        }
-        break;
-
-      case 'ready':
-        if (this.readyResolve) {
-          this.readyResolve();
-        }
-        break;
-    }
-  }
-
-  private async handleToolCall(msg: { id: string; name: string; args: unknown }): Promise<void> {
-    if (!this.pendingExecution) {
-      this.send({ type: 'tool-error', id: msg.id, error: 'No active execution context' });
-      return;
-    }
-
-    const fns = this.pendingExecution.fns;
-    const fn = fns[msg.name];
-
-    if (!fn) {
-      this.send({
-        type: 'tool-error',
-        id: msg.id,
-        error: `Tool '${msg.name}' not found.`,
-      });
-      return;
-    }
-
-    try {
-      const args = msg.args;
-      const result = await fn(...(Array.isArray(args) ? args : [args]));
-      this.send({ type: 'tool-result', id: msg.id, result });
-    } catch (err) {
-      this.send({
-        type: 'tool-error',
-        id: msg.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  private send(msg: HostMessage): void {
+  protected send(msg: HostMessage): void {
     if (this.execStream) {
       this.execStream.write(JSON.stringify(msg) + '\n');
     }
   }
 
-  async execute(
-    code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult> {
-    await this.init();
-
-    if (this.pendingExecution) {
-      return {
-        result: undefined,
-        error: 'Another execution is already in progress',
-      };
-    }
-
-    const id = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const wrappedCode = wrapCode(code);
-
-    return new Promise<ExecuteResult>((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        if (this.pendingExecution?.id === id) {
-          this.pendingExecution = null;
-          resolve({
-            result: undefined,
-            error: `Code execution timeout after ${this.timeout}ms`,
-          });
-        }
-      }, this.timeout);
-
-      this.pendingExecution = { id, resolve, reject, fns, timeoutHandle };
-      this.send({ type: 'execute', id, code: wrappedCode });
-    });
-  }
-
-  dispose(): void {
-    if (this.pendingExecution) {
+  protected onBadJson(line: string): void {
+    logError('Container sent non-JSON output (likely crashed)', { output: line });
+    if (this.readyReject) {
+      this.readyReject(new Error('Container sent non-JSON output: ' + line));
+    } else if (this.pendingExecution) {
       clearTimeout(this.pendingExecution.timeoutHandle);
-      this.pendingExecution.reject(new Error('Executor disposed'));
+      this.pendingExecution.reject(new Error('Container sent non-JSON output: ' + line));
       this.pendingExecution = null;
     }
+  }
 
+  protected onFatalError(error: { message: string; stack?: string; name?: string }): void {
+    logError(
+      `[Executor:Socket] Container runner fatal error: ${error.message}\n${error.stack ?? ''}`,
+      { component: 'Executor' }
+    );
+    super.onFatalError(error);
+  }
+
+  protected onDisposePrepare(): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
+  }
 
+  protected onDisposeCleanup(): void {
     if (this.execStream) {
-      try {
-        this.send({ type: 'shutdown' });
-      } catch { /* ignore */ }
       if (typeof this.execStream.end === 'function') this.execStream.end();
       this.execStream = null;
     }
+  }
 
-    if (this.readline) {
-      this.readline.close();
-      this.readline = null;
-    }
-
+  protected onDisposeKill(): void {
     if (this.container) {
       this.container.stop().catch(() => { /* ignore */ });
       this.container = null;
     }
-
-    this.ready = false;
-    this.initPromise = null;
   }
 }
 

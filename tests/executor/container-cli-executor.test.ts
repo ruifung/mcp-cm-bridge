@@ -14,22 +14,22 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
   execFileSync: vi.fn(), // used by detectRuntime (bypassed via runtime option) and pullImage
 }));
-vi.mock('../utils/logger.js', () => ({
+vi.mock('../../src/utils/logger.js', () => ({
   logDebug: vi.fn(),
   logInfo: vi.fn(),
   logError: vi.fn(),
 }));
-vi.mock('../utils/env.js', () => ({
+vi.mock('../../src/utils/env.js', () => ({
   isBun: vi.fn().mockReturnValue(false),
   isDeno: vi.fn().mockReturnValue(false),
 }));
-vi.mock('./wrap-code.js', () => ({
+vi.mock('../../src/executor/wrap-code.js', () => ({
   wrapCode: vi.fn((code: string) => code),
 }));
 
 // ── Imports (after mocks) ────────────────────────────────────────────
 import { spawn, execFileSync } from 'node:child_process';
-import { ContainerCliExecutor } from './container-cli-executor.js';
+import { ContainerCliExecutor } from '../../src/executor/container-cli-executor.js';
 
 // ── Mock child process factory ────────────────────────────────────────
 

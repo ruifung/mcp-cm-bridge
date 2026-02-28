@@ -10,25 +10,25 @@ import { EventEmitter } from 'node:events';
 
 // ── Module-level mocks (hoisted before imports) ──────────────────────
 vi.mock('dockerode');
-vi.mock('../utils/docker.js', () => ({
+vi.mock('../../src/utils/docker.js', () => ({
   resolveDockerSocketPath: vi.fn().mockReturnValue('/var/run/docker.sock'),
 }));
-vi.mock('../utils/logger.js', () => ({
+vi.mock('../../src/utils/logger.js', () => ({
   logDebug: vi.fn(),
   logInfo: vi.fn(),
   logError: vi.fn(),
 }));
-vi.mock('../utils/env.js', () => ({
+vi.mock('../../src/utils/env.js', () => ({
   isBun: vi.fn().mockReturnValue(false),
   isDeno: vi.fn().mockReturnValue(false),
 }));
-vi.mock('./wrap-code.js', () => ({
+vi.mock('../../src/executor/wrap-code.js', () => ({
   wrapCode: vi.fn((code: string) => code),
 }));
 
 // ── Imports (after mocks) ────────────────────────────────────────────
 import Docker from 'dockerode';
-import { ContainerSocketExecutor } from './container-socket-executor.js';
+import { ContainerSocketExecutor } from '../../src/executor/container-socket-executor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

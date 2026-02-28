@@ -5,7 +5,7 @@
 
 import type { Executor } from "@cloudflare/codemode";
 import { logInfo, logDebug } from "../utils/logger.js";
-import { isNode, isDeno, isBun, getNodeMajorVersion } from "../utils/env.js";
+import { isDeno } from "../utils/env.js";
 import { resolveDockerSocketPath } from '../utils/docker.js';
 
 // ── Executor type ───────────────────────────────────────────────────
@@ -42,32 +42,27 @@ interface ExecutorEntry {
 let _isolatedVmAvailable: boolean | null = null;
 
 async function isDenoAvailable(): Promise<boolean> {
-  // Only allow Deno executor if running on Deno
-  return isDeno();
+  // If already running on Deno, execPath is available directly
+  if (isDeno()) return true;
+
+  // Otherwise probe PATH for a deno binary
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('deno', ['--version'], { stdio: 'ignore', timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function isIsolatedVmAvailable(): Promise<boolean> {
   if (_isolatedVmAvailable !== null) return _isolatedVmAvailable;
 
-  // isolated-vm is a native module specifically built for Node.js.
-  // While Bun and Deno provide compatibility layers, they often fail or
-  // exhibit unstable behavior with native Node modules like isolated-vm.
-  // Additionally, isolated-vm only supports LTS (even-numbered) Node.js versions.
-  const majorVersion = getNodeMajorVersion();
-  const isEvenVersion = majorVersion > 0 && majorVersion % 2 === 0;
-
-  if (!isNode() || !isEvenVersion) {
-    logDebug('isolated-vm is only supported on LTS (even-numbered) versions of native Node.js (not Bun, Deno, or odd-numbered Node versions)', { component: 'Executor' });
-    _isolatedVmAvailable = false;
-    return false;
-  }
-
   logDebug('Checking isolated-vm availability...', { component: 'Executor' });
   
   try {
-    // We run the check in a separate process because isolated-vm can cause 
+    // Run the check in a separate process because isolated-vm can cause 
     // segmentation faults if native dependencies or environment are incompatible.
-    // Running it here ensures a crash doesn't take down the main bridge process.
     const checkScript = `
       import ivm from 'isolated-vm';
       const isolate = new ivm.Isolate({ memoryLimit: 8 });
@@ -81,7 +76,7 @@ async function isIsolatedVmAvailable(): Promise<boolean> {
     logDebug('isolated-vm is available and functional (verified via subprocess)', { component: 'Executor' });
     _isolatedVmAvailable = true;
   } catch (err) {
-    logDebug(`isolated-vm check failed or crashed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
+    logDebug(`isolated-vm check failed: ${err instanceof Error ? err.message : String(err)}`, { component: 'Executor' });
     _isolatedVmAvailable = false;
   }
   return _isolatedVmAvailable;
@@ -134,21 +129,21 @@ async function isContainerAvailable(): Promise<boolean> {
 
 const executorRegistry: ExecutorEntry[] = [
   {
-    type: 'deno',
-    preference: 0,
-    isAvailable: isDenoAvailable,
-    async create(timeout) {
-      const { createDenoExecutor } = await import('../executor/deno-executor.js');
-      return createDenoExecutor({ timeout });
-    },
-  },
-  {
     type: 'isolated-vm',
-    preference: 1,
+    preference: 0,
     isAvailable: isIsolatedVmAvailable,
     async create(timeout) {
       const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
       return createIsolatedVmExecutor({ timeout });
+    },
+  },
+  {
+    type: 'deno',
+    preference: 1,
+    isAvailable: isDenoAvailable,
+    async create(timeout) {
+      const { createDenoExecutor } = await import('../executor/deno-executor.js');
+      return createDenoExecutor({ timeout });
     },
   },
   {
@@ -164,13 +159,11 @@ const executorRegistry: ExecutorEntry[] = [
     type: 'vm2',
     preference: 3,
     isAvailable: async () => {
-      // vm2 is fundamentally broken on Bun (prototype freezing issues)
-      // and Node.js built-in 'node:vm' is not safe for untrusted code.
-      if (isBun()) return false;
-      
       try {
-        await import('vm2');
-        return true;
+        const { VM } = await import('vm2');
+        const vm = new VM({ timeout: 1000, eval: false });
+        const result = vm.run('1 + 1');
+        return result === 2;
       } catch {
         return false;
       }

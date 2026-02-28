@@ -2,7 +2,7 @@
  * Container runner script — main thread that owns the stdio protocol.
  *
  * Runs inside the container. For each "execute" request, spawns a
- * worker_thread (container-worker.mjs) to eval the code. This ensures
+ * worker_thread (container-worker.ts) to eval the code. This ensures
  * that user code cannot interfere with the main thread's event loop,
  * globals, or the protocol stream.
  *
@@ -29,6 +29,22 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// ── Types ────────────────────────────────────────────────────────────
+
+/** Messages sent from host → container (stdin) */
+type HostMessage =
+  | { type: 'execute'; id: string; code: string }
+  | { type: 'tool-result'; id: string; result: unknown }
+  | { type: 'tool-error'; id: string; error: string }
+  | { type: 'heartbeat' }
+  | { type: 'shutdown' };
+
+/** Messages sent from worker → runner */
+type WorkerMessage =
+  | { type: 'tool-call'; id: string; name: string; args: unknown }
+  | { type: 'result'; id: string; result: unknown; logs?: string[] }
+  | { type: 'error'; id: string; error: string; logs?: string[] };
+
 // ── Constants ───────────────────────────────────────────────────────
 
 const HEARTBEAT_TIMEOUT_MS = 15_000; // 3x the 5s host interval
@@ -38,57 +54,57 @@ const HEARTBEAT_TIMEOUT_MS = 15_000; // 3x the 5s host interval
 // (e.g., missing module, syntax error) are reported to the host rather
 // than silently hanging the ready-signal wait.
 
-function reportFatalError(err) {
+function reportFatalError(err: unknown): void {
+  const e = err instanceof Error ? err : new Error(String(err));
   const payload = JSON.stringify({
     type: 'error',
     error: {
-      message: err?.message ?? String(err),
-      stack: err?.stack ?? '',
-      name: err?.name ?? 'Error',
+      message: e.message,
+      stack: e.stack ?? '',
+      name: e.name,
     },
   });
   try {
     process.stdout.write(payload + '\n');
   } catch { /* stdout may be gone — nothing we can do */ }
-  process.stderr.write(`[container-runner] Fatal error: ${err?.stack ?? err}\n`);
+  process.stderr.write(`[container-runner] Fatal error: ${e.stack ?? e}\n`);
   process.exit(1);
 }
 
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', (err: Error) => {
   reportFatalError(err);
 });
 
-process.on('unhandledRejection', (reason) => {
+process.on('unhandledRejection', (reason: unknown) => {
   reportFatalError(reason instanceof Error ? reason : new Error(String(reason)));
 });
 
 process.stderr.write('[container-runner] Starting...\n');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const WORKER_PATH = join(__dirname, 'container-worker.mjs');
+const __filename: string = fileURLToPath(import.meta.url);
+const __dirname: string = dirname(__filename);
+const WORKER_PATH: string =
+  process.env['CODEMODE_WORKER_PATH'] ?? join(__dirname, 'container-worker.ts');
 
 // ── Active worker state ─────────────────────────────────────────────
 
-/** @type {Worker | null} */
-let activeWorker = null;
-/** @type {string | null} */
-let activeExecutionId = null;
+let activeWorker: Worker | null = null;
+let activeExecutionId: string | null = null;
 
 // ── Heartbeat watchdog state ────────────────────────────────────────
 
-let lastHeartbeat = Date.now();
-let heartbeatWatchdog = null;
+let lastHeartbeat: number = Date.now();
+let heartbeatWatchdog: ReturnType<typeof setInterval> | null = null;
 
 // ── Protocol helpers ────────────────────────────────────────────────
 
-function send(msg) {
+function send(msg: object): void {
   process.stdout.write(JSON.stringify(msg) + '\n');
 }
 
 // ── Execute code in a worker thread ─────────────────────────────────
 
-function executeCode(id, code) {
+function executeCode(id: string, code: string): void {
   // If there's already a worker running, reject
   if (activeWorker) {
     send({
@@ -113,7 +129,7 @@ function executeCode(id, code) {
   //   result     -> forward to host, then clean up
   //   error      -> forward to host, then clean up
 
-  worker.on('message', (msg) => {
+  worker.on('message', (msg: WorkerMessage) => {
     switch (msg.type) {
       case 'tool-call':
         // Forward tool call from worker to host
@@ -133,12 +149,12 @@ function executeCode(id, code) {
         break;
 
       default:
-        process.stderr.write(`[runner] unknown worker message type: ${msg.type}\n`);
+        process.stderr.write(`[runner] unknown worker message type: ${(msg as WorkerMessage).type}\n`);
     }
   });
 
   // ── Worker crash / exit ───────────────────────────────────────
-  worker.on('error', (err) => {
+  worker.on('error', (err: Error) => {
     send({
       type: 'error',
       id,
@@ -147,7 +163,7 @@ function executeCode(id, code) {
     cleanup();
   });
 
-  worker.on('exit', (exitCode) => {
+  worker.on('exit', (exitCode: number) => {
     // Only report if we haven't already sent a result/error
     if (activeWorker === worker) {
       if (exitCode !== 0) {
@@ -162,14 +178,14 @@ function executeCode(id, code) {
   });
 }
 
-function cleanup() {
+function cleanup(): void {
   activeWorker = null;
   activeExecutionId = null;
 }
 
 // ── Message dispatcher ──────────────────────────────────────────────
 
-function handleMessage(msg) {
+function handleMessage(msg: HostMessage): void {
   switch (msg.type) {
     case 'heartbeat':
       lastHeartbeat = Date.now();
@@ -205,7 +221,7 @@ function handleMessage(msg) {
       break;
 
     default:
-      process.stderr.write(`[runner] unknown message type: ${msg.type}\n`);
+      process.stderr.write(`[runner] unknown message type: ${(msg as HostMessage).type}\n`);
   }
 }
 
@@ -213,14 +229,14 @@ function handleMessage(msg) {
 
 const rl = createInterface({ input: process.stdin, terminal: false });
 
-rl.on('line', (line) => {
+rl.on('line', (line: string) => {
   if (!line.trim()) return;
   process.stderr.write('[container-runner] Received message: ' + line.substring(0, 100) + '\n');
   try {
-    const msg = JSON.parse(line);
+    const msg = JSON.parse(line) as HostMessage;
     handleMessage(msg);
   } catch (err) {
-    process.stderr.write(`[runner] failed to parse message: ${err.message}\n`);
+    process.stderr.write(`[runner] failed to parse message: ${(err as Error).message}\n`);
   }
 });
 
@@ -244,13 +260,13 @@ process.stderr.write('[container-runner] Ready signal sent\n');
 
 // Start heartbeat watchdog — if host stops sending heartbeats, self-terminate
 heartbeatWatchdog = setInterval(() => {
-  const elapsed = Date.now() - lastHeartbeat;
+  const elapsed: number = Date.now() - lastHeartbeat;
   if (elapsed > HEARTBEAT_TIMEOUT_MS) {
     process.stderr.write(`[container-runner] No heartbeat from host for ${elapsed}ms, self-terminating\n`);
     if (activeWorker) {
-      try { activeWorker.terminate(); } catch {}
+      try { activeWorker.terminate(); } catch { /* ignore */ }
     }
-    clearInterval(heartbeatWatchdog);
+    clearInterval(heartbeatWatchdog!);
     process.exit(1);
   }
 }, 5_000); // check every 5 seconds

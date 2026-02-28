@@ -1,6 +1,6 @@
 /**
  * Container worker script — runs inside a worker_thread, spawned by
- * container-runner.mjs for each code execution request.
+ * container-runner.ts for each code execution request.
  *
  * Responsibilities:
  *   1. Receive { code } from parent via workerData
@@ -10,7 +10,7 @@
  *   4. Eval the code (indirect eval in global scope)
  *   5. Send { type: 'result' | 'error', ... } back to parent
  *
- * Communication with parent (container-runner.mjs main thread):
+ * Communication with parent (container-runner.ts main thread):
  *   Worker → Parent:
  *     { type: 'tool-call', id, name, args }
  *     { type: 'result', result, logs }
@@ -23,17 +23,51 @@
 
 import { parentPort, workerData } from 'node:worker_threads';
 
-const { code } = workerData;
+// ── Types ────────────────────────────────────────────────────────────
+
+interface WorkerData {
+  code: string;
+}
+
+interface ToolCallMessage {
+  type: 'tool-call';
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+interface ToolResultMessage {
+  type: 'tool-result';
+  id: string;
+  result: unknown;
+}
+
+interface ToolErrorMessage {
+  type: 'tool-error';
+  id: string;
+  error: string;
+}
+
+type ParentInboundMessage = ToolResultMessage | ToolErrorMessage;
+
+interface PendingToolCall {
+  resolve: (value: unknown) => void;
+  reject: (reason: Error) => void;
+}
+
+// ── Initialise ───────────────────────────────────────────────────────
+
+const { code } = workerData as WorkerData;
 
 // ── State ───────────────────────────────────────────────────────────
 
-let pendingToolCalls = new Map();   // id -> { resolve, reject }
-let toolCallCounter = 0;
-let logs = [];
+const pendingToolCalls = new Map<string, PendingToolCall>();
+let toolCallCounter: number = 0;
+const logs: string[] = [];
 
 // ── Console capture ─────────────────────────────────────────────────
 
-function stringify(value) {
+function stringify(value: unknown): string {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (typeof value === 'string') return value;
@@ -42,66 +76,71 @@ function stringify(value) {
 }
 
 const capturedConsole = {
-  log:   (...args) => { logs.push(args.map(stringify).join(' ')); },
-  warn:  (...args) => { logs.push('[WARN] '  + args.map(stringify).join(' ')); },
-  error: (...args) => { logs.push('[ERROR] ' + args.map(stringify).join(' ')); },
-  info:  (...args) => { logs.push(args.map(stringify).join(' ')); },
-  debug: (...args) => { logs.push('[DEBUG] ' + args.map(stringify).join(' ')); },
+  log:   (...args: unknown[]): void => { logs.push(args.map(stringify).join(' ')); },
+  warn:  (...args: unknown[]): void => { logs.push('[WARN] '  + args.map(stringify).join(' ')); },
+  error: (...args: unknown[]): void => { logs.push('[ERROR] ' + args.map(stringify).join(' ')); },
+  info:  (...args: unknown[]): void => { logs.push(args.map(stringify).join(' ')); },
+  debug: (...args: unknown[]): void => { logs.push('[DEBUG] ' + args.map(stringify).join(' ')); },
 };
 
 // Replace global console in this worker thread
-globalThis.console = capturedConsole;
+(globalThis as typeof globalThis & { console: typeof console }).console = capturedConsole as typeof console;
 
 // ── Codemode proxy (tool RPC via parentPort) ────────────────────────
 
-function createCodemodeProxy() {
-  return new Proxy({}, {
-    get(_target, prop) {
+function createCodemodeProxy(): object {
+  return new Proxy({} as Record<string | symbol, unknown>, {
+    get(_target: Record<string | symbol, unknown>, prop: string | symbol): unknown {
       const name = String(prop);
       if (typeof prop === 'symbol') return undefined;
       if (name === 'then') return undefined;
       if (name === 'toJSON') return undefined;
 
-      return (...args) => {
+      return (...args: unknown[]): Promise<unknown> => {
         const id = `tc-${++toolCallCounter}`;
-        return new Promise((resolve, reject) => {
+        return new Promise<unknown>((resolve, reject) => {
           pendingToolCalls.set(id, { resolve, reject });
-          parentPort.postMessage({
+          parentPort!.postMessage({
             type: 'tool-call',
             id,
             name,
             args: args.length === 1 ? args[0] : args,
-          });
+          } satisfies ToolCallMessage);
         });
       };
     },
   });
 }
 
-globalThis.codemode = createCodemodeProxy();
+type GlobalWithExtras = typeof globalThis & {
+  codemode: object;
+  Function: typeof Function;
+};
+
+(globalThis as GlobalWithExtras).codemode = createCodemodeProxy();
 
 // ── Sandbox hardening ───────────────────────────────────────────────
 // Save reference to eval before overriding — the worker uses indirect eval
 // to execute user code in run().
-const _savedEval = eval;
+const _savedEval: typeof eval = eval;
 
 // 1. Block eval from user code
 Object.defineProperty(globalThis, 'eval', {
-  value: function() { throw new Error('eval is not allowed'); },
+  value: function(): never { throw new Error('eval is not allowed'); },
   writable: false, enumerable: false, configurable: false,
 });
 
 // 2. Block Function constructor (equivalent to eval)
 {
   const OrigFunction = Function;
-  function BlockedFunction() { throw new Error('Function constructor is not allowed'); }
+  function BlockedFunction(this: unknown): never { throw new Error('Function constructor is not allowed'); }
   BlockedFunction.prototype = OrigFunction.prototype;
-  globalThis.Function = BlockedFunction;
+  (globalThis as GlobalWithExtras).Function = BlockedFunction as unknown as typeof Function;
 }
 
 // 3. Make codemode non-configurable & non-writable
 Object.defineProperty(globalThis, 'codemode', {
-  value: globalThis.codemode,
+  value: (globalThis as GlobalWithExtras).codemode,
   writable: false,
   configurable: false,
   enumerable: true,
@@ -109,7 +148,7 @@ Object.defineProperty(globalThis, 'codemode', {
 
 // ── Handle messages from parent (tool results) ─────────────────────
 
-parentPort.on('message', (msg) => {
+parentPort!.on('message', (msg: ParentInboundMessage) => {
   if (msg.type === 'tool-result') {
     const pending = pendingToolCalls.get(msg.id);
     if (pending) {
@@ -127,18 +166,18 @@ parentPort.on('message', (msg) => {
 
 // ── Execute the code ────────────────────────────────────────────────
 
-async function run() {
+async function run(): Promise<void> {
   try {
-    const result = await _savedEval(code);
+    const result: unknown = await _savedEval(code);
 
-    parentPort.postMessage({
+    parentPort!.postMessage({
       type: 'result',
       result: result ?? null,
       logs: logs.length ? logs : undefined,
     });
-  } catch (err) {
+  } catch (err: unknown) {
     const error = err instanceof Error ? err.message : String(err);
-    parentPort.postMessage({
+    parentPort!.postMessage({
       type: 'error',
       error,
       logs: logs.length ? logs : undefined,
