@@ -24,7 +24,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { z } from 'zod';
-import type { Executor } from '../executor/types.js';
+import type { Executor } from '../sandbox/executor/helpers/types.js';
 import { normalizeCode, sanitizeToolName } from './schema-utils.js';
 import { getRuntimeName } from '../utils/env.js';
 

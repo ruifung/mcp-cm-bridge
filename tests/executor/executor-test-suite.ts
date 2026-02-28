@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import type { Executor, ExecuteResult } from './types.js';
-import { getRuntimeName } from '../utils/env.js';
+import type { Executor, ExecuteResult } from './helpers/types.js';
+import { getRuntimeName } from '../../utils/env.js';
 
 /**
  * Universal executor test suite

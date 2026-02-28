@@ -18,7 +18,7 @@ import { FileWatcher } from '../../src/utils/file-watcher.js';
 import { loadMCPConfigFile, getServerConfig, type MCPJsonConfig } from '../../src/mcp/config.js';
 import { logDebug, logInfo, logWarn } from '../../src/utils/logger.js';
 import type { MCPServerConfig } from '../../src/mcp/mcp-client.js';
-import type { ServerManager } from '../../src/mcp/server-manager.js';
+import type { UpstreamMcpClientManager } from '../../src/mcp/upstream-mcp-client-manager.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -110,11 +110,11 @@ function makeServerConfig(name: string, overrides: Partial<MCPServerConfig> = {}
 }
 
 /** Create a mock ServerManager with jest-spy methods */
-function makeServerManager(): ServerManager {
+function makeServerManager(): UpstreamMcpClientManager {
   return {
     connectServer: vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
     disconnectServer: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-  } as unknown as ServerManager;
+  } as unknown as UpstreamMcpClientManager;
 }
 
 /**
@@ -142,7 +142,7 @@ async function triggerFileChange(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe('ConfigWatcher', () => {
-  let serverManager: ServerManager;
+  let serverManager: UpstreamMcpClientManager;
   let onServersChanged: ReturnType<typeof vi.fn<() => Promise<void>>>;
 
   const CONFIG_PATH = '/workspace/mcp.json';

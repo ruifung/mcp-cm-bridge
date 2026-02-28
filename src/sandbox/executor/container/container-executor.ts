@@ -6,10 +6,10 @@
  * is unavailable or fails to initialize.
  */
 
-import type { Executor, ExecuteResult } from './types.js';
+import type { Executor, ExecuteResult } from '../helpers/types.js';
 import { ContainerSocketExecutor, type ContainerSocketExecutorOptions } from './container-socket-executor.js';
 import { ContainerCliExecutor, type ContainerCliExecutorOptions } from './container-cli-executor.js';
-import { logDebug, logInfo, logError } from '../utils/logger.js';
+import { logDebug, logInfo, logError } from '../../../utils/logger.js';
 
 const MAX_RETRIES = 3;
 const MAX_RETRY_WINDOW_MS = 10_000;

@@ -23,8 +23,8 @@ export function getScriptPaths(): ScriptPaths {
   }
 
   return {
-    runner: resolveScript(join(dir, 'container-runner')),
-    worker: resolveScript(join(dir, 'container-worker')),
+    runner: resolveScript(join(dir, 'remote-runner')),
+    worker: resolveScript(join(dir, 'remote-worker')),
   };
 }
 

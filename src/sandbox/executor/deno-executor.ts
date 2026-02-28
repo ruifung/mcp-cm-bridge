@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess, execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { RemoteExecutorBase } from './remote-executor-base.js';
-import type { HostMessage } from './remote-executor-types.js';
-import { getScriptPaths } from './script-paths.js';
+import { RemoteExecutorBase } from './remote/remote-executor-base.js';
+import type { HostMessage } from './remote/remote-executor-types.js';
+import { getScriptPaths } from './remote/script-paths.js';
 
 // ── Types ───────────────────────────────────────────────────────────
 

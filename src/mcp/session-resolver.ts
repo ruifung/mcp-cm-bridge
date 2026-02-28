@@ -6,8 +6,9 @@
  * guard, and singleton management can be unit-tested independently.
  */
 
-import type { Executor } from '../executor/types.js';
+import type { Executor } from '../sandbox/executor/helpers/types.js';
 import type { ExecutorInfo } from './executor.js';
+import {SandboxManager} from "@/sandbox/manager.js";
 
 // ── Public constants ───────────────────────────────────────────────────────
 

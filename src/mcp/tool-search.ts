@@ -7,7 +7,7 @@
  */
 
 import { generateTypes, jsonSchemaToZod } from "./schema-utils.js";
-import type { ServerManager } from "./server-manager.js";
+import type { UpstreamMcpClientManager } from "./upstream-mcp-client-manager.js";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -199,7 +199,7 @@ function generateSchemaSnippet(name: string, rawSchema: any): string {
  * Build a ToolSearchEntry array from the ServerManager's current tool set.
  * Convenience helper used by server.ts to populate the search index.
  */
-export function buildSearchEntries(serverManager: ServerManager): ToolSearchEntry[] {
+export function buildSearchEntries(serverManager: UpstreamMcpClientManager): ToolSearchEntry[] {
   return serverManager.getToolList().map(({ name, description }) => {
     const descriptor = serverManager.getToolByName(name);
     return {

@@ -3,7 +3,7 @@
  * Selects the best available executor (isolated-vm → container → vm2)
  */
 
-import type { Executor } from '../executor/types.js';
+import type { Executor } from '../sandbox/executor/helpers/types.js';
 import { logInfo, logDebug } from "../utils/logger.js";
 import { isDeno } from "../utils/env.js";
 import { resolveDockerSocketPath } from '../utils/docker.js';
@@ -15,8 +15,9 @@ import { resolveDockerSocketPath } from '../utils/docker.js';
 const _ivmFileUrl = import.meta.resolve('isolated-vm');
 
 // ── Executor type ───────────────────────────────────────────────────
- 
-export type ExecutorType = 'isolated-vm' | 'container' | 'deno' | 'vm2';
+
+export const ExecutorTypes = ['isolated-vm', 'container', 'deno', 'vm2'] as const;
+export type ExecutorType = typeof ExecutorTypes[number];
 
 /**
  * Metadata about the executor that was created.
@@ -145,7 +146,7 @@ const executorRegistry: ExecutorEntry[] = [
     preference: 0,
     isAvailable: isIsolatedVmAvailable,
     async create(timeout) {
-      const { createIsolatedVmExecutor } = await import('../executor/isolated-vm-executor.js');
+      const { createIsolatedVmExecutor } = await import('../sandbox/executor/isolated-vm-executor.js');
       return createIsolatedVmExecutor({ timeout });
     },
   },
@@ -154,7 +155,7 @@ const executorRegistry: ExecutorEntry[] = [
     preference: 1,
     isAvailable: isDenoAvailable,
     async create(timeout) {
-      const { createDenoExecutor } = await import('../executor/deno-executor.js');
+      const { createDenoExecutor } = await import('../sandbox/executor/deno-executor.js');
       return createDenoExecutor({ timeout });
     },
   },
@@ -163,7 +164,7 @@ const executorRegistry: ExecutorEntry[] = [
     preference: 2,
     isAvailable: isContainerAvailable,
     async create(timeout) {
-      const { createContainerExecutor } = await import('../executor/container-executor.js');
+      const { createContainerExecutor } = await import('../sandbox/executor/container/container-executor.js');
       return createContainerExecutor({ timeout });
     },
   },
@@ -181,7 +182,7 @@ const executorRegistry: ExecutorEntry[] = [
       }
     },
     async create(timeout) {
-      const { createVM2Executor } = await import('../executor/vm2-executor.js');
+      const { createVM2Executor } = await import('../sandbox/executor/vm2-executor.js');
       return createVM2Executor({ timeout });
     },
   },

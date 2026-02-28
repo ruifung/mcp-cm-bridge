@@ -1,8 +1,8 @@
-import type { Executor, ExecuteResult } from './types.js';
+import type { Executor, ExecuteResult } from './helpers/types.js';
 // @ts-ignore - isolated-vm is an optional dependency; this file is only loaded via dynamic import() when available
 import ivm from 'isolated-vm';
-import { wrapCode } from './wrap-code.js';
-import { logWarn } from '../utils/logger.js';
+import { wrapCode } from './helpers/wrap-code.js';
+import { logWarn } from '../../utils/logger.js';
 const { Isolate, Context } = ivm;
 type IsolateType = InstanceType<typeof ivm.Isolate>;
 type ContextType = ReturnType<IsolateType['createContextSync']>;

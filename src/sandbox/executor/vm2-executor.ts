@@ -4,8 +4,8 @@
  */
 
 import { VM } from "vm2";
-import type { Executor, ExecuteResult } from './types.js';
-import { wrapCode } from "./wrap-code.js";
+import type { Executor, ExecuteResult } from './helpers/types.js';
+import { wrapCode } from "./helpers/wrap-code.js";
 
 /**
  * VM2-based Executor implementation

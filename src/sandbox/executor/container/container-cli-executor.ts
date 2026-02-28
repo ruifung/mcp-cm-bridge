@@ -9,10 +9,10 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { RemoteExecutorBase } from './remote-executor-base.js';
-import type { HostMessage } from './remote-executor-types.js';
-import { logDebug, logError } from '../utils/logger.js';
-import { getScriptPaths } from './script-paths.js';
+import { RemoteExecutorBase } from '../remote/remote-executor-base.js';
+import type { HostMessage } from '../remote/remote-executor-types.js';
+import { logDebug, logError } from '../../../utils/logger.js';
+import { getScriptPaths } from '../remote/script-paths.js';
 
 const MAX_STDERR_LINES = 100;
 const HEARTBEAT_INTERVAL_MS = 5_000; // 5 seconds

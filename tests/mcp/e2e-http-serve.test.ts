@@ -384,4 +384,156 @@ describe('HTTP Serve Mode E2E', () => {
     expect(text).toContain('utils__yaml__parse');
     expect(text).toContain('utils__yaml__stringify');
   });
+
+  // ── 11. Utils tool invocation regression ─────────────────────────────────
+  //
+  // Regression tests for the runtime failure when utils tools are invoked.
+  // Reported symptom: calling utils__yaml__parse or utils__yaml__stringify
+  // from inside the eval sandbox throws "keyValidator._parse is not a function",
+  // suspected to be a Zod v4 compatibility issue.
+  //
+  // Tests 11a and 11b verify direct MCP protocol calls (i.e. sharedClient.callTool
+  // with the utils tool name). Because utils tools are NOT registered as top-level
+  // MCP tools on the McpServer (only accessible through the eval sandbox), these
+  // calls are expected to fail with a "Tool not found" error, not a Zod runtime
+  // error. This confirms the architecture and isolates the failure to the eval path.
+  //
+  // Tests 11c and 11d target the eval sandbox path, which is where the reported
+  // runtime error occurs.  Test 11d is a sanity-check baseline.
+  //
+  // ALL FOUR TESTS ARE EXPECTED TO FAIL INITIALLY while the bug is present:
+  //   11a and 11b fail because the tool name is not exposed as a direct MCP call.
+  //   11c fails with the "keyValidator._parse is not a function" Zod error.
+  //   11d passes (basic eval sanity — it does NOT call any utils tool).
+  //
+  // Once the bug is fixed, 11c (and optionally 11a/11b if the architecture
+  // changes to expose utils tools directly) should pass.
+
+  // ── 11a. Direct MCP call — yaml parse (architecture probe) ───────────────
+
+  it('should handle a direct MCP callTool for utils__yaml__parse (not an exposed top-level MCP tool)', async () => {
+    // utils__yaml__parse is only accessible through the eval sandbox —
+    // it is NOT registered as a top-level MCP tool on the McpServer.
+    // This test documents that calling it directly results in an error response
+    // (tool not found), NOT a runtime crash of the server.
+    let response: any;
+    let threw = false;
+    try {
+      response = await sharedClient.callTool({
+        name: 'utils__yaml__parse',
+        arguments: { input: 'key: value' },
+      });
+    } catch (err) {
+      threw = true;
+      response = err;
+    }
+
+    // The server should respond with a recognisable error (tool not found),
+    // not crash or return an unrelated Zod runtime error.
+    if (threw) {
+      // SDK threw because the server returned an error — expected
+      const msg = (response as Error).message ?? String(response);
+      expect(msg).toMatch(/tool.*not found|unknown tool|method not found/i);
+    } else {
+      // Server returned an isError response — also acceptable
+      const content = response?.content;
+      expect(Array.isArray(content)).toBe(true);
+      const text: string = (content?.[0]?.text ?? '').toLowerCase();
+      expect(text).toMatch(/tool.*not found|unknown tool|not registered/i);
+    }
+  });
+
+  // ── 11b. Direct MCP call — yaml stringify (architecture probe) ────────────
+
+  it('should handle a direct MCP callTool for utils__yaml__stringify (not an exposed top-level MCP tool)', async () => {
+    // Same architecture probe as 11a, but for the stringify tool.
+    let response: any;
+    let threw = false;
+    try {
+      response = await sharedClient.callTool({
+        name: 'utils__yaml__stringify',
+        arguments: { input: { key: 'value' } },
+      });
+    } catch (err) {
+      threw = true;
+      response = err;
+    }
+
+    if (threw) {
+      const msg = (response as Error).message ?? String(response);
+      expect(msg).toMatch(/tool.*not found|unknown tool|method not found/i);
+    } else {
+      const content = response?.content;
+      expect(Array.isArray(content)).toBe(true);
+      const text: string = (content?.[0]?.text ?? '').toLowerCase();
+      expect(text).toMatch(/tool.*not found|unknown tool|not registered/i);
+    }
+  });
+
+  // ── 11c. Eval sandbox — yaml parse (primary regression target) ───────────
+  //
+  // This is the MAIN regression test. Reported to fail with:
+  //   "keyValidator._parse is not a function"
+  // which is a Zod v4 internal API incompatibility (the SDK or zod-to-ts still
+  // calls a Zod v3 internal `_parse` method that no longer exists in v4).
+
+  it('should execute utils__yaml__parse inside the eval sandbox without a runtime error', async () => {
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const raw = await codemode.utils__yaml__parse({ input: "hello: world\\ncount: 99" });
+        // Surface both the raw response shape and parsed result for diagnosis
+        const result = raw?.structuredContent?.result ?? raw?.content?.[0]?.text;
+        return { type: "json", value: result };
+      }`,
+    );
+
+    // The parsed YAML should be a JavaScript object with the expected fields
+    expect(output.result).toBeDefined();
+    expect(typeof output.result).toBe('object');
+    expect(output.result).not.toBeNull();
+    expect((output.result as any).hello).toBe('world');
+    expect((output.result as any).count).toBe(99);
+  });
+
+  // ── 11d. Eval sandbox sanity — basic arithmetic (baseline) ────────────────
+  //
+  // This test does NOT call any utils tool. If it passes while 11c fails, the
+  // bug is isolated to the utils tool invocation (Zod schema validation or
+  // descriptor wiring), not a general eval sandbox failure.
+  // If this test ALSO fails, the eval sandbox itself is broken.
+
+  it('should evaluate a simple expression in the sandbox (no codemode calls)', async () => {
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const x = 1 + 1;
+        return { type: "json", value: x };
+      }`,
+    );
+
+    expect(output.result).toBe(2);
+  });
+
+  // ── 11e. Eval sandbox — yaml stringify (secondary regression target) ───────
+  //
+  // Companion to 11c. Verifies the stringify direction of the utils tools.
+
+  it('should execute utils__yaml__stringify inside the eval sandbox without a runtime error', async () => {
+    const output = await callEval(
+      sharedClient,
+      `async () => {
+        const raw = await codemode.utils__yaml__stringify({ input: { greeting: "hello", count: 42 } });
+        // The stringify tool returns the YAML string as content[0].text
+        const yamlString = raw?.content?.[0]?.text ?? raw?.structuredContent?.result;
+        return { type: "json", value: yamlString };
+      }`,
+    );
+
+    expect(typeof output.result).toBe('string');
+    expect(output.result.length).toBeGreaterThan(0);
+    expect(output.result).toContain('greeting:');
+    expect(output.result).toContain('hello');
+    expect(output.result).toContain('42');
+  });
 });

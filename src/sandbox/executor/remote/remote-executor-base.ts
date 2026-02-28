@@ -16,8 +16,8 @@
  *   - onFatalError()      — called when a fatal runner error is received
  */
 
-import type { Executor, ExecuteResult } from './types.js';
-import { wrapCode } from './wrap-code.js';
+import type { Executor, ExecuteResult } from '../helpers/types.js';
+import { wrapCode } from '../helpers/wrap-code.js';
 import type { HostMessage, RuntimeMessage, PendingExecution } from './remote-executor-types.js';
 import { createInterface, type Interface } from 'node:readline';
 
