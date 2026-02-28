@@ -12,7 +12,7 @@
  */
 
 import { FileWatcher } from "../utils/file-watcher.js";
-import { ServerManager } from "./server-manager.js";
+import { UpstreamMcpClientManager } from "./upstream-mcp-client-manager.js";
 import type { MCPServerConfig } from "./mcp-client.js";
 import { loadMCPConfigFile, getServerConfig, type MCPJsonConfig } from "./config.js";
 import { logDebug, logInfo, logWarn } from "../utils/logger.js";
@@ -27,7 +27,7 @@ export interface ConfigWatcherOptions {
    * When undefined every server in the config file is managed.
    */
   serverFilter?: string[];
-  serverManager: ServerManager;
+  serverManager: UpstreamMcpClientManager;
   /** Called after the server set has changed so the eval tool can be rebuilt. */
   onServersChanged: () => Promise<void>;
 }
@@ -35,7 +35,7 @@ export interface ConfigWatcherOptions {
 export class ConfigWatcher {
   private readonly configPath: string;
   private readonly serverFilter: string[] | undefined;
-  private readonly serverManager: ServerManager;
+  private readonly serverManager: UpstreamMcpClientManager;
   private readonly onServersChanged: () => Promise<void>;
 
   private watcher: FileWatcher | null = null;

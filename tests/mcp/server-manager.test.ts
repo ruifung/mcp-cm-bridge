@@ -38,7 +38,7 @@ vi.mock('@cloudflare/codemode', () => ({
   generateTypes: vi.fn((_tools: any) => '/* mocked schema */'),
 }));
 
-import { ServerManager } from '../../src/mcp/server-manager.js';
+import { UpstreamMcpClientManager } from '../../src/mcp/upstream-mcp-client-manager.js';
 import { MCPClient, type MCPServerConfig, type MCPTool } from '../../src/mcp/mcp-client.js';
 import { logDebug, logError, logInfo } from '../../src/utils/logger.js';
 import { jsonSchemaToZod } from '../../src/mcp/schema-utils.js';
@@ -85,11 +85,11 @@ function setupMockClient(tools: MCPTool[] = []): MockMCPClient {
 // ── Test suite ────────────────────────────────────────────────────────────────
 
 describe('ServerManager', () => {
-  let manager: ServerManager;
+  let manager: UpstreamMcpClientManager;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    manager = new ServerManager();
+    manager = new UpstreamMcpClientManager();
   });
 
   afterEach(() => {

@@ -27,14 +27,17 @@ import { generateTypes, normalizeCode, sanitizeToolName } from "./schema-utils.j
 import { z } from "zod";
 import { createExecutor, type ExecutorInfo, type ExecutorType } from "./executor.js";
 import { SessionResolver } from "./session-resolver.js";
-import type { ToolDescriptor } from "./server-manager.js";
+import type { ToolDescriptor } from "./upstream-mcp-client-manager.js";
 import { type MCPServerConfig } from "./mcp-client.js";
 import { logDebug, logError, logInfo, enableStderrBuffering } from "../utils/logger.js";
-import { ServerManager } from "./server-manager.js";
+import { UpstreamMcpClientManager } from "./upstream-mcp-client-manager.js";
 import { ConfigWatcher } from "./config-watcher.js";
 import { tokenPersistence } from "./token-persistence.js";
 import { loadMCPConfigFile } from "./config.js";
 import { BM25SearchProvider, buildSearchEntries } from "./tool-search.js";
+import {SandboxManager} from "@/sandbox/manager.js";
+import {SandboxEvalTool} from "@/tools/SandboxEvalTool.js";
+import {BridgeStatusTool} from "@/tools/BridgeStatusTool.js";
 
 // Re-export MCPServerConfig and ExecutorType for backwards compatibility
 export type { MCPServerConfig, ExecutorType }
@@ -116,167 +119,15 @@ export function paginateToolList(input: PaginateInput): PaginateOutput | { error
   };
 }
 
-/**
- * Short, static description for the eval tool.
- * Discovery tools (sandbox_get_functions, sandbox_search_functions, sandbox_get_function_schema) let the LLM
- * find the correct callable name and parameter types before writing code.
- */
-const EVAL_TOOL_DESCRIPTION = `Execute JavaScript code in a sandboxed environment. Use this to call upstream functions exposed on the codemode object. Other sandbox_* tools are for discovery only and are called directly as tools, not from inside this code.
-
-Before writing code, follow this sequence:
-1. Discover: call sandbox_search_functions or sandbox_get_functions to find the function you need.
-2. Inspect: call sandbox_get_function_schema to get the exact TypeScript signature and parameter types.
-3. Execute: call this tool with code that uses the codemode object to invoke those functions.
-
-The code parameter accepts one of two formats. Do not mix them.
-
-Format A — Bare statements. Write one or more JavaScript statements. They will be wrapped in an async function automatically. You can use await freely. To produce output, either use an explicit return statement, or let the last expression be the value you want returned (it is returned automatically). If you do not return a value and there is no final expression, the result is null.
-
-  const result = await codemode.server_name__function_name({ param: "value" });
-  return { type: "json", value: result };
-
-Format B — A complete async arrow function expression. The entire input must be the function; do not include any other top-level statements. You must use an explicit return statement.
-
-  async () => {
-    const result = await codemode.server_name__function_name({ param: "value" });
-    return { type: "json", value: result };
-  }
-
-The sandbox provides only the codemode object. No other APIs are available: no filesystem functions, no network functions, no require() or import statements. The only callable functions are properties on the codemode object.
-
-REQUIRED RETURN TYPE — scripts MUST return an EvalReturn value. Plain values are not accepted.
-
-  type EvalReturn =
-    | { type: "text"; text: string }                    // plain text output
-    | { type: "image"; data: string; mimeType: string } // base64-encoded image
-    | { type: "audio"; data: string; mimeType: string } // base64-encoded audio
-    | { type: "json"; value: unknown }                  // any JSON-serializable value
-    | EvalReturn[];                                     // multiple content blocks
-
-Examples of valid return values:
-  return { type: "json", value: result };
-  return { type: "text", text: "done" };
-  return { type: "image", data: base64String, mimeType: "image/png" };
-  return [{ type: "text", text: "summary" }, { type: "json", value: details }];
-
-Returning a plain value (e.g. \`return result\`) will cause a validation error.`;
-
-
-// ── EvalReturn validation and mapping ────────────────────────────────────────
-
-/**
- * The required return type for sandbox_eval_js scripts.
- * Plain values are not accepted — all returns must conform to this shape.
- */
-export type EvalReturn =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string }
-  | { type: "audio"; data: string; mimeType: string }
-  | { type: "json"; value: unknown }
-  | EvalReturn[];
-
-/**
- * Validate that a value conforms to EvalReturn.
- * Returns true if valid, false otherwise.
- */
-export function isValidEvalReturn(value: unknown): value is EvalReturn {
-  if (Array.isArray(value)) {
-    return value.every(isValidEvalReturn);
-  }
-  if (value === null || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
-  switch (obj["type"]) {
-    case "text":
-      return typeof obj["text"] === "string";
-    case "image":
-    case "audio":
-      return typeof obj["data"] === "string" && typeof obj["mimeType"] === "string";
-    case "json":
-      return "value" in obj;
-    default:
-      return false;
-  }
-}
-
-type McpContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string }
-  | { type: "audio"; data: string; mimeType: string };
-
-/**
- * Map a validated EvalReturn value to an array of MCP content blocks.
- * JSON variants are serialised to text content blocks.
- */
-export function mapEvalReturnToContent(
-  evalReturn: EvalReturn
-): { content: McpContentBlock[] } {
-  const items: Exclude<EvalReturn, EvalReturn[]>[] = Array.isArray(evalReturn)
-    ? evalReturn as Exclude<EvalReturn, EvalReturn[]>[]
-    : [evalReturn as Exclude<EvalReturn, EvalReturn[]>];
-
-  const content: McpContentBlock[] = [];
-
-  for (const item of items) {
-    switch (item.type) {
-      case "text":
-        content.push({ type: "text", text: item.text });
-        break;
-      case "image":
-        content.push({ type: "image", data: item.data, mimeType: item.mimeType });
-        break;
-      case "audio":
-        content.push({ type: "audio", data: item.data, mimeType: item.mimeType });
-        break;
-      case "json":
-        content.push({ type: "text", text: JSON.stringify(item.value, null, 2) });
-        break;
-    }
-  }
-
-  return { content };
-}
 
 // ── Shared status tool registration ───────────────────────────────────────
 
 function registerStatusTool(
   target: McpServer,
   executorInfo: ExecutorInfo,
-  serverManager: ServerManager
+  serverManager: UpstreamMcpClientManager
 ): void {
-  target.registerTool(
-    "sandbox_status",
-    {
-      description: "Return the current status of the codemode bridge, including connected server names and the number of functions each server provides. Use this to see which servers are available before calling sandbox_get_functions.",
-      inputSchema: z.object({}).strict(),
-      outputSchema: z.object({
-        servers: z.array(z.object({
-          name: z.string(),
-          toolCount: z.number(),
-        })),
-      }),
-    },
-    async () => {
-      const serverInfo = serverManager.getServerToolInfo();
-      const totalTools = serverInfo.reduce((sum, s) => sum + s.toolCount, 0);
-
-      const status = {
-        executor: {
-          type: executorInfo.type,
-          reason: executorInfo.reason,
-          timeout: executorInfo.timeout,
-        },
-        servers: serverInfo.map(({ name, toolCount }) => ({ name, toolCount })),
-        totalTools,
-      };
-
-      const servers = serverInfo.map(({ name, toolCount }) => ({ name, toolCount }));
-
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
-        structuredContent: { servers },
-      } as any;
-    }
-  );
+  new BridgeStatusTool(executorInfo, serverManager).registerWithMcpServer(target)
 }
 
 // ── Discovery tools registration ───────────────────────────────────────────
@@ -288,14 +139,14 @@ function registerStatusTool(
  *   - sandbox_search_functions: keyword-search the tool index
  *
  * @param target       The McpServer to register tools on
- * @param serverManager Source of tool metadata
+ * @param sandboxManager Source of tool metadata
  * @param searchProvider The search index (must already be built)
  * @param schemaCache  A shared cache keyed by namespaced tool name. Populated
  *                     lazily by get_tool_schema; must be cleared on live-reload.
  */
 function registerDiscoveryTools(
   target: McpServer,
-  serverManager: ServerManager,
+  sandboxManager: SandboxManager,
   searchProvider: BM25SearchProvider,
   schemaCache: Map<string, string>
 ): void {
@@ -320,11 +171,11 @@ function registerDiscoveryTools(
       }),
     },
     async (args) => {
-      const flat = serverManager.getToolList(args.server);
+      const flat = sandboxManager.getToolList(args.server);
       const pageSize = args.pageSize ?? 50;
       const result = paginateToolList({ tools: flat, cursor: args.cursor, pageSize });
       if ('error' in result) {
-        return { content: [{ type: 'text' as const, text: result.error }], isError: true } as any;
+        return { content: [{ type: 'text' as const, text: result.error }], isError: true, structuredContent: { tools: [] } } as any;
       }
       // Decode cursor offset to find which slice was returned
       let offset = 0;
@@ -335,7 +186,7 @@ function registerDiscoveryTools(
       }
       const pageTools = flat.slice(offset, offset + pageSize);
       const structuredContent: { tools: Array<{ server: string; name: string; description: string; schema?: string }>; nextCursor?: string } = {
-        tools: pageTools.map((t) => ({ server: t.server, name: t.name, description: t.description })),
+        tools: pageTools.map((t) => ({ server: t.namespace, name: t.name, description: t.description })),
       };
       if (result.nextCursor !== undefined) structuredContent.nextCursor = result.nextCursor;
       return {
@@ -373,6 +224,8 @@ function registerDiscoveryTools(
             type: "text" as const,
             text: `Tool "${args.tool_name}" not found. Use sandbox_get_functions to list available tools.`,
           }],
+          isError: true,
+          structuredContent: { typeScript: "" },
         } as any;
       }
 
@@ -419,8 +272,9 @@ function registerDiscoveryTools(
  * Register the built-in `utils` virtual server on the given ServerManager.
  * All tools run in-process — no upstream MCP connection is created.
  */
-function registerUtilsServer(serverManager: ServerManager): void {
+function registerUtilsServer(serverManager: UpstreamMcpClientManager): void {
   const yamlParseDescriptor: ToolDescriptor = {
+    name: "yaml__parse",
     description: "Parse a YAML string into a JavaScript value",
     inputSchema: z.object({ input: z.string().describe("YAML string to parse") }),
     rawSchema: {
@@ -430,7 +284,7 @@ function registerUtilsServer(serverManager: ServerManager): void {
       },
       required: ["input"],
     },
-    outputSchema: z.object({ result: z.unknown() }),
+    outputSchema: z.object({ result: z.any() }),
     execute: async (args: { input: string }) => {
       try {
         const result = jsYaml.load(args.input, { schema: jsYaml.CORE_SCHEMA });
@@ -443,14 +297,16 @@ function registerUtilsServer(serverManager: ServerManager): void {
         return {
           content: [{ type: "text" as const, text: `YAML parse error: ${message}` }],
           isError: true,
+          structuredContent: { result: null },
         };
       }
     },
   };
 
   const yamlStringifyDescriptor: ToolDescriptor = {
+    name: "yaml__stringify",
     description: "Serialize a JavaScript value to a YAML string",
-    inputSchema: z.object({ input: z.unknown().describe("Value to serialize to YAML") }),
+    inputSchema: z.object({ input: z.any().describe("Value to serialize to YAML") }),
     rawSchema: {
       type: "object",
       properties: {
@@ -471,6 +327,7 @@ function registerUtilsServer(serverManager: ServerManager): void {
         return {
           content: [{ type: "text" as const, text: `YAML stringify error: ${message}` }],
           isError: true,
+          structuredContent: { result: "" },
         };
       }
     },
@@ -522,7 +379,8 @@ export async function startCodeModeBridgeServer(
   enableStderrBuffering();
 
   // ── Connect all upstream servers via ServerManager ─────────────────────────
-  const serverManager = new ServerManager();
+  const sandboxManager = new SandboxManager();
+  const serverManager = new UpstreamMcpClientManager(sandboxManager);
 
   // Register built-in virtual servers before connecting real upstream servers
   registerUtilsServer(serverManager);
@@ -544,6 +402,7 @@ export async function startCodeModeBridgeServer(
   const { executor: initialExecutor, info: executorInfo } = await createExecutor(30000, resolvedExecutorType);
   await initialExecutor.execute('async () => { return "startup test" }', {});
 
+
   // ── SessionResolver ────────────────────────────────────────────────────────
   const sessionResolver = new SessionResolver({
     createExecutor: (timeout) => createExecutor(timeout, resolvedExecutorType),
@@ -556,146 +415,7 @@ export async function startCodeModeBridgeServer(
     },
   });
 
-  const resolveExecutor = (sid?: string) => sessionResolver.resolve(sid);
-
-  // ── Eval tool schema (static) ─────────────────────────────────────────────
-  const evalInputSchema = z.object({
-    code: z.string().describe("JavaScript code to execute. Provide either bare statements (auto-wrapped in an async function) or a complete async () => { ... } arrow function expression. If the input starts with async () =>, the entire input must be that function. Do not combine both formats in one call."),
-  });
-
-  // ── Eval tool handler factory ─────────────────────────────────────────────
-  // Returns a fresh handler closure whose getDescriptors() captures the current
-  // server state. Called once at registration and again on rebuild so that
-  // live-reload picks up the updated tool set without re-registering.
-  function makeEvalHandler(getDescriptors: () => Record<string, ToolDescriptor>) {
-    return async (args: { code: string }, extra: any) => {
-      const sessionId = extra?.sessionId as string | undefined;
-      const executor = await resolveExecutor(sessionId);
-      const descriptors = getDescriptors();
-
-      const fns: Record<string, (args: unknown) => Promise<unknown>> = {};
-      for (const [name, descriptor] of Object.entries(descriptors)) {
-        fns[sanitizeToolName(name)] = descriptor.execute;
-      }
-
-      const normalizedCode = normalizeCode(args.code);
-      const executeResult = await executor.execute(normalizedCode, fns);
-
-      if (executeResult.error) {
-        const logCtx = executeResult.logs?.length
-          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-          : "";
-        throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
-      }
-
-      const raw = executeResult.result;
-
-      // Validate the return value against EvalReturn
-      if (!isValidEvalReturn(raw)) {
-        const received = raw === null ? "null"
-          : Array.isArray(raw) ? `array(${(raw as unknown[]).length})`
-          : typeof raw === "object" ? `object with keys: ${Object.keys(raw as object).join(", ") || "(none)"}`
-          : typeof raw;
-        const errorText =
-          `sandbox_eval_js: script returned an invalid value.\n\n` +
-          `Received: ${received}\n\n` +
-          `Scripts MUST return an EvalReturn value. Wrap your result like this:\n\n` +
-          `  return { type: "json", value: result };\n\n` +
-          `The full EvalReturn type is:\n` +
-          `  type EvalReturn =\n` +
-          `    | { type: "text"; text: string }\n` +
-          `    | { type: "image"; data: string; mimeType: string }\n` +
-          `    | { type: "audio"; data: string; mimeType: string }\n` +
-          `    | { type: "json"; value: unknown }\n` +
-          `    | EvalReturn[];`;
-        const logCtx = executeResult.logs?.length
-          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-          : "";
-        return {
-          content: [{ type: "text" as const, text: errorText + logCtx }],
-          isError: true,
-        };
-      }
-
-      const mapped = mapEvalReturnToContent(raw);
-
-      if (executeResult.logs?.length) {
-        mapped.content.push({
-          type: "text",
-          text: `\n\nConsole output:\n${executeResult.logs.join("\n")}`,
-        });
-      }
-
-      return {
-        content: mapped.content,
-        isError: false,
-      } as any;
-    };
-  }
-
-  // ── registerEvalTool ──────────────────────────────────────────────────────
-  // Registers the eval tool on a McpServer and returns the handle so the
-  // caller can call .update() for live-reload.
-  function registerEvalTool(mcpServer: McpServer): RegisteredTool {
-    return mcpServer.registerTool(
-      "sandbox_eval_js",
-      {
-        description: EVAL_TOOL_DESCRIPTION,
-        inputSchema: evalInputSchema,
-      },
-      makeEvalHandler(() => serverManager.getAllToolDescriptors())
-    );
-  }
-
-  // ── Per-session eval tool handle map ──────────────────────────────────────
-  // Tracks RegisteredTool handles for all active sessions, keyed by session ID.
-  // HTTP sessions use their UUID as key; stdio uses '__stdio__'.
-  // rebuildEvalTool() iterates this map so live-reload notifications reach
-  // every connected client regardless of transport mode.
-  const sessionToolHandles = new Map<string, RegisteredTool>();
-
-  // ── Live-reload: rebuild the eval tool after server changes ───────────────
-  async function rebuildEvalTool(): Promise<void> {
-    const descriptors = serverManager.getAllToolDescriptors();
-    const count = Object.keys(descriptors).length;
-
-    // Rebuild search index and clear schema cache so discovery tools reflect
-    // the new tool set after a live-reload.
-    searchProvider.rebuild(buildSearchEntries(serverManager));
-    schemaCache.clear();
-
-    logInfo(
-      `Rebuilding eval tool with ${count} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
-      { component: 'Bridge' }
-    );
-
-    // Build the update payload once and apply it to every active session handle.
-    // Description and schema are static; a fresh handler closure is sufficient
-    // to pick up the updated descriptor set.
-    // Each handle's .update() call triggers tools/list_changed on that session's
-    // connected client — whether stdio or HTTP.
-    const updatePayload = {
-      description: EVAL_TOOL_DESCRIPTION,
-      paramsSchema: evalInputSchema as any,
-      callback: makeEvalHandler(() => serverManager.getAllToolDescriptors()),
-    };
-
-    for (const handle of sessionToolHandles.values()) {
-      handle.update(updatePayload);
-    }
-
-    logInfo(
-      `Eval tool rebuilt and tool-list-changed notification sent to ${sessionToolHandles.size} session(s)`,
-      { component: 'Bridge' }
-    );
-
-    // Log updated tool breakdown by server
-    for (const { name, tools } of serverManager.getServerToolInfo()) {
-      if (tools.length > 0) {
-        logInfo(`${name}: ${tools.join(', ')}`, { component: 'Bridge', server: name });
-      }
-    }
-  }
+  const sandboxEvalTool = new SandboxEvalTool(sessionResolver, sandboxManager);
 
   // ── Background connect upstream servers ───────────────────────────────────
   if (serverConfigs.length > 0) {
@@ -704,7 +424,7 @@ export async function startCodeModeBridgeServer(
       { component: 'Bridge' }
     );
     for (const config of serverConfigs) {
-      serverManager.connectServerInBackground(config.name, config, rebuildEvalTool);
+      serverManager.connectServerInBackground(config.name, config);
     }
   }
 
@@ -717,7 +437,7 @@ export async function startCodeModeBridgeServer(
         configPath,
         serverFilter,
         serverManager,
-        onServersChanged: rebuildEvalTool,
+        onServersChanged: async () => {}
       });
       configWatcher.start(initialConfig);
     } catch (error) {
@@ -785,7 +505,7 @@ export async function startCodeModeBridgeServer(
       const mcpServer = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
 
       // Register the eval tool directly (session-aware: each call resolves its own executor via sessionId)
-      const registeredEvalTool = registerEvalTool(mcpServer);
+      const registeredEvalTool = sandboxEvalTool.registerWithMcpServer(mcpServer);
 
       // Register the status tool
       registerStatusTool(mcpServer, executorInfo, serverManager);
@@ -796,7 +516,7 @@ export async function startCodeModeBridgeServer(
       return { mcpServer, registeredEvalTool };
     };
 
-    await startHttpTransport(httpOptions, executorInfo, (fn) => { transportCloseFn = fn; }, buildMcpServer, sessionToolHandles);
+    await startHttpTransport(httpOptions, executorInfo, (fn) => { transportCloseFn = fn; }, buildMcpServer);
   } else {
     // stdio mode: create the single global McpServer and register tools on it.
     const mcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
@@ -806,9 +526,7 @@ export async function startCodeModeBridgeServer(
       { component: 'Bridge' }
     );
 
-    // Register the eval tool directly and store the handle for live-reload.
-    const stdioEvalHandle = registerEvalTool(mcp);
-    sessionToolHandles.set('__stdio__', stdioEvalHandle);
+    sandboxEvalTool.registerWithMcpServer(mcp)
 
     registerStatusTool(mcp, executorInfo, serverManager);
 
@@ -848,7 +566,6 @@ async function startHttpTransport(
   executorInfo: ExecutorInfo,
   registerTransportClose: (fn: () => Promise<void>) => void,
   buildMcpServer: () => Promise<{ mcpServer: McpServer; registeredEvalTool: RegisteredTool }>,
-  sessionToolHandles: Map<string, RegisteredTool>
 ): Promise<void> {
   const { port, host } = options;
 
@@ -883,14 +600,10 @@ async function startHttpTransport(
             sessionIdGenerator: () => crypto.randomUUID(),
             onsessioninitialized: (sid) => {
               sessions.set(sid, transport);
-              // Store the eval tool handle for this session so rebuildEvalTool()
-              // can push live-reload updates to it.
-              sessionToolHandles.set(sid, registeredEvalTool);
               logInfo(`Session initialized: ${sid}`, { component: 'Bridge' });
               // Capture sid in closure for O(1) cleanup on close
               transport.onclose = () => {
                 sessions.delete(sid);
-                sessionToolHandles.delete(sid);
                 logInfo(`Session closed: ${sid}`, { component: 'Bridge' });
               };
             },
@@ -921,7 +634,6 @@ async function startHttpTransport(
           const transport = sessions.get(sessionId)!;
           await transport.handleRequest(req, res);
           sessions.delete(sessionId);
-          sessionToolHandles.delete(sessionId);
         } else {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Unknown or missing session ID' }));
@@ -950,7 +662,6 @@ async function startHttpTransport(
     // Close all active session transports and clear tracking maps
     await Promise.all([...sessions.values()].map((t) => t.close().catch(() => {})));
     sessions.clear();
-    sessionToolHandles.clear();
     await new Promise<void>((resolve, reject) => {
       httpServer.close((err) => (err ? reject(err) : resolve()));
     });

@@ -55,7 +55,7 @@ vi.mock('../../src/utils/logger.js', () => ({
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { ServerManager } from '../../src/mcp/server-manager.js';
+import { UpstreamMcpClientManager } from '../../src/mcp/upstream-mcp-client-manager.js';
 import { MCPClient, type MCPServerConfig, type MCPTool } from '../../src/mcp/mcp-client.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -87,11 +87,11 @@ function setupMockClient(tools: MCPTool[]): void {
 // ── Test suite ────────────────────────────────────────────────────────────────
 
 describe('ServerManager', () => {
-  let manager: ServerManager;
+  let manager: UpstreamMcpClientManager;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    manager = new ServerManager();
+    manager = new UpstreamMcpClientManager();
   });
 
   afterEach(() => {
