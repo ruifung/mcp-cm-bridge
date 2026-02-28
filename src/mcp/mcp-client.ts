@@ -53,6 +53,11 @@ export interface MCPServerConfig {
   env?: Record<string, string>;
   /** OAuth2 configuration (only for http/sse transports) */
   oauth?: OAuth2Config;
+  /**
+   * Maximum number of connection attempts for background connect retry logic.
+   * Defaults to 5 when using connectServerInBackground().
+   */
+  maxRetries?: number;
 }
 
 /**

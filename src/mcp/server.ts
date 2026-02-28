@@ -527,25 +527,6 @@ export async function startCodeModeBridgeServer(
   // Register built-in virtual servers before connecting real upstream servers
   registerUtilsServer(serverManager);
 
-  await Promise.all(
-    serverConfigs.map((config) => serverManager.connectServer(config.name, config))
-  );
-
-  const allToolDescriptors = serverManager.getAllToolDescriptors();
-  const totalToolCount = Object.keys(allToolDescriptors).length;
-
-  logInfo(
-    `Total: ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
-    { component: 'Bridge' }
-  );
-
-  // Log tools grouped by server
-  for (const { name, tools } of serverManager.getServerToolInfo()) {
-    if (tools.length > 0) {
-      logInfo(`${name}: ${tools.join(', ')}`, { component: 'Bridge', server: name });
-    }
-  }
-
   // ── Search index + schema cache for discovery tools ───────────────────────
   const searchProvider = new BM25SearchProvider();
   searchProvider.build(buildSearchEntries(serverManager));
@@ -716,6 +697,17 @@ export async function startCodeModeBridgeServer(
     }
   }
 
+  // ── Background connect upstream servers ───────────────────────────────────
+  if (serverConfigs.length > 0) {
+    logInfo(
+      `Starting background connections to ${serverConfigs.length} server(s)...`,
+      { component: 'Bridge' }
+    );
+    for (const config of serverConfigs) {
+      serverManager.connectServerInBackground(config.name, config, rebuildEvalTool);
+    }
+  }
+
   // ── Config watcher (live reload) ───────────────────────────────────────────
   let configWatcher: ConfigWatcher | undefined;
   if (configPath) {
@@ -810,7 +802,7 @@ export async function startCodeModeBridgeServer(
     const mcp = new McpServer({ name: "codemode-bridge", version: "1.0.0" });
 
     logInfo(
-      `Creating eval tool with ${totalToolCount} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
+      `Creating eval tool with ${Object.keys(serverManager.getAllToolDescriptors()).length} tools from ${serverManager.getConnectedServerNames().length} server(s)`,
       { component: 'Bridge' }
     );
 
